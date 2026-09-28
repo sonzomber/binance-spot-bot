@@ -1,0 +1,27 @@
+# Secretos: NUNCA subir el .env real
+.env
+.env.*
+!.env.example
+
+# Dependencias
+node_modules/
+
+# Datos locales: base de datos, logs, caché de velas
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.log
+
+# Kill switch (archivo creado por `npm run kill`)
+STOP
+
+# Cobertura de tests
+coverage/
+
+# Sistema / editores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
