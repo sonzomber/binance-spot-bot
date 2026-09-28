@@ -6,11 +6,15 @@ import {
   describeConfig,
   loadConfig,
 } from '../../src/config/index.js';
+import { testEnv } from '../helpers.js';
+
+/** Carga la config con la estrategia mínima obligatoria ya definida. */
+const load = (env = {}) => loadConfig(testEnv(env));
 
 /** Devuelve la lista de problemas de una config inválida. */
 function issuesOf(env) {
   try {
-    loadConfig(env);
+    load(env);
   } catch (err) {
     expect(err).toBeInstanceOf(ConfigError);
     return err.issues;
@@ -19,8 +23,8 @@ function issuesOf(env) {
 }
 
 describe('loadConfig — valores por defecto', () => {
-  it('sin variables: testnet, dry-run y parámetros seguros', () => {
-    const config = loadConfig({});
+  it('solo con STRATEGY: testnet, dry-run y parámetros seguros', () => {
+    const config = load();
     expect(config.env).toBe('testnet');
     expect(config.dryRun).toBe(true);
     expect(config.symbol).toBe('BTC/USDT');
@@ -34,7 +38,7 @@ describe('loadConfig — valores por defecto', () => {
   });
 
   it('trata las líneas vacías del .env ("KEY=") como no definidas', () => {
-    const config = loadConfig({ BINANCE_ENV: '', DRY_RUN: '', MAX_TRADE_USDT: '  ', BINANCE_API_KEY: '' });
+    const config = load({ BINANCE_ENV: '', DRY_RUN: '', MAX_TRADE_USDT: '  ', BINANCE_API_KEY: '' });
     expect(config.env).toBe('testnet');
     expect(config.dryRun).toBe(true);
     expect(config.risk.maxTradeUsdt).toBe(50);
@@ -42,15 +46,29 @@ describe('loadConfig — valores por defecto', () => {
   });
 
   it('resuelve las rutas relativas desde la raíz del proyecto', () => {
-    const config = loadConfig({ DB_PATH: './data/test.db' });
+    const config = load({ DB_PATH: './data/test.db' });
     expect(config.storage.dbPath).toBe(path.resolve(PROJECT_ROOT, 'data/test.db'));
     expect(path.isAbsolute(config.risk.killSwitchFile)).toBe(true);
   });
 });
 
+describe('loadConfig — estrategia activa (obligatoria)', () => {
+  it.each([
+    ['sin definir', {}],
+    ['vacía', { STRATEGY: '' }],
+    ['solo espacios', { STRATEGY: '   ' }],
+  ])('STRATEGY %s: no arranca', (_label, env) => {
+    expect(() => loadConfig(env)).toThrow(/STRATEGY: es obligatoria/);
+  });
+
+  it('usa el nombre elegido explícitamente', () => {
+    expect(loadConfig({ STRATEGY: ' sma-cross ' }).strategy.id).toBe('sma-cross');
+  });
+});
+
 describe('loadConfig — entorno (nunca mainnet)', () => {
   it.each(['testnet', 'demo', 'TESTNET', ' Demo '])('acepta "%s"', (value) => {
-    expect(['testnet', 'demo']).toContain(loadConfig({ BINANCE_ENV: value }).env);
+    expect(['testnet', 'demo']).toContain(load({ BINANCE_ENV: value }).env);
   });
 
   it.each(['mainnet', 'live', 'production', 'prod', 'real', 'api.binance.com'])(
@@ -71,7 +89,7 @@ describe('loadConfig — validaciones', () => {
   });
 
   it('acepta DRY_RUN=false con keys', () => {
-    const config = loadConfig({ DRY_RUN: 'false', BINANCE_API_KEY: 'k', BINANCE_API_SECRET: 's' });
+    const config = load({ DRY_RUN: 'false', BINANCE_API_KEY: 'k', BINANCE_API_SECRET: 's' });
     expect(config.dryRun).toBe(false);
   });
 
@@ -80,7 +98,7 @@ describe('loadConfig — validaciones', () => {
     ['false', false], ['0', false], ['no', false],
   ])('interpreta DRY_RUN=%s como %s', (value, expected) => {
     const keys = { BINANCE_API_KEY: 'k', BINANCE_API_SECRET: 's' };
-    expect(loadConfig({ DRY_RUN: value, ...keys }).dryRun).toBe(expected);
+    expect(load({ DRY_RUN: value, ...keys }).dryRun).toBe(expected);
   });
 
   it('rechaza booleanos ambiguos', () => {
@@ -88,13 +106,13 @@ describe('loadConfig — validaciones', () => {
   });
 
   it('normaliza el símbolo y exige cotización en USDT', () => {
-    expect(loadConfig({ SYMBOL: 'eth/usdt' }).symbol).toBe('ETH/USDT');
+    expect(load({ SYMBOL: 'eth/usdt' }).symbol).toBe('ETH/USDT');
     expect(issuesOf({ SYMBOL: 'ETH/BTC' }).join()).toMatch(/SYMBOL/);
     expect(issuesOf({ SYMBOL: 'BTCUSDT' }).join()).toMatch(/SYMBOL/);
   });
 
   it('parsea STRATEGY_PARAMS como objeto JSON', () => {
-    expect(loadConfig({ STRATEGY_PARAMS: '{"fast":9,"slow":21}' }).strategy.params).toEqual({ fast: 9, slow: 21 });
+    expect(load({ STRATEGY_PARAMS: '{"fast":9,"slow":21}' }).strategy.params).toEqual({ fast: 9, slow: 21 });
     expect(issuesOf({ STRATEGY_PARAMS: '{fast:9}' }).join()).toMatch(/STRATEGY_PARAMS/);
     expect(issuesOf({ STRATEGY_PARAMS: '[1,2]' }).join()).toMatch(/STRATEGY_PARAMS/);
   });
@@ -123,7 +141,7 @@ describe('loadConfig — validaciones', () => {
 
 describe('loadConfig — inmutabilidad', () => {
   it('la config no se puede modificar en tiempo de ejecución', () => {
-    const config = loadConfig({});
+    const config = load();
     expect(() => { config.env = 'mainnet'; }).toThrow(TypeError);
     expect(() => { config.risk.maxTradeUsdt = 1e9; }).toThrow(TypeError);
     expect(config.env).toBe('testnet');
@@ -132,13 +150,13 @@ describe('loadConfig — inmutabilidad', () => {
 
 describe('describeConfig', () => {
   it('no expone secretos, solo si están configurados', () => {
-    const config = loadConfig({ BINANCE_API_KEY: 'abcd1234efgh5678', BINANCE_API_SECRET: 'supersecret' });
+    const config = load({ BINANCE_API_KEY: 'abcd1234efgh5678', BINANCE_API_SECRET: 'supersecret' });
     const safe = describeConfig(config);
     expect(JSON.stringify(safe)).not.toContain('supersecret');
     expect(JSON.stringify(safe)).not.toContain('abcd');
     expect(safe).not.toHaveProperty('apiKey');
     expect(safe).not.toHaveProperty('apiSecret');
     expect(safe.credentials).toBe('configuradas');
-    expect(describeConfig(loadConfig({})).credentials).toBe('no configuradas');
+    expect(describeConfig(load()).credentials).toBe('no configuradas');
   });
 });

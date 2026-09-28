@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../../src/config/index.js';
+import { testEnv } from '../helpers.js';
 import {
   ALLOWED_HOSTS,
   SafetyError,
@@ -74,7 +75,7 @@ describe('assertAllowedUrl', () => {
 describe('createTradingExchange', () => {
   const exchanges = [];
   const make = (env) => {
-    const exchange = createTradingExchange(loadConfig({ BINANCE_ENV: env }));
+    const exchange = createTradingExchange(loadConfig(testEnv({ BINANCE_ENV: env })));
     exchanges.push(exchange);
     return exchange;
   };
@@ -116,7 +117,7 @@ describe('guardia de red en tiempo de ejecución', () => {
   });
 
   it('bloquea REST a mainnet ANTES de enviar la petición', async () => {
-    exchange = createTradingExchange(loadConfig({}));
+    exchange = createTradingExchange(loadConfig(testEnv()));
     // ccxt usa fetchImplementation para la llamada HTTP real; si la guardia fallara,
     // la petición llegaría a este mock (y nunca a la red).
     const network = vi.fn();
@@ -132,7 +133,7 @@ describe('guardia de red en tiempo de ejecución', () => {
   });
 
   it('bloquea aunque se desactive el modo sandbox', async () => {
-    exchange = createTradingExchange(loadConfig({}));
+    exchange = createTradingExchange(loadConfig(testEnv()));
     exchange.fetchImplementation = vi.fn();
     exchange.setSandboxMode(false); // las URLs vuelven a mainnet...
     expect(() => assertExchangeUrls(exchange, 'testnet')).toThrow(SafetyError); // ...el preflight lo detecta
@@ -140,13 +141,13 @@ describe('guardia de red en tiempo de ejecución', () => {
   });
 
   it('bloquea WebSockets a mainnet', () => {
-    exchange = createTradingExchange(loadConfig({}));
+    exchange = createTradingExchange(loadConfig(testEnv()));
     expect(() => exchange.client('wss://stream.binance.com:9443/ws')).toThrow(SafetyError);
     expect(exchange.clients?.['wss://stream.binance.com:9443/ws']).toBeUndefined();
   });
 
   it('la guardia no se puede quitar ni reinstalar', () => {
-    exchange = createTradingExchange(loadConfig({}));
+    exchange = createTradingExchange(loadConfig(testEnv()));
     expect(() => { exchange.fetch = async () => ({}); }).toThrow(TypeError);
     expect(() => { exchange.client = () => ({}); }).toThrow(TypeError);
     expect(() => installRequestGuard(exchange, 'demo')).toThrow(/ya está instalada/);

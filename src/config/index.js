@@ -107,7 +107,13 @@ const envSchema = z
       z.preprocess(normalized, z.enum(['rest', 'ws'], { error: 'debe ser "rest" o "ws"' })).default('rest'),
     ),
 
-    STRATEGY: envValue(z.string().trim().default('sma-cross')),
+    // Sin valor por defecto a propósito: la estrategia activa se elige explícitamente.
+    // Que el nombre exista lo verifica el registro de estrategias al arrancar.
+    STRATEGY: envValue(
+      z
+        .string({ error: 'es obligatoria: elige la estrategia activa, p. ej. STRATEGY=sma-cross' })
+        .trim(),
+    ),
     STRATEGY_PARAMS: jsonObjectVar,
 
     MAX_TRADE_USDT: numberVar(50, (n) => n.positive('debe ser mayor que 0')),
