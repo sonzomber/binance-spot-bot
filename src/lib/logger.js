@@ -21,22 +21,31 @@ const REDACT_PATHS = [
 ];
 
 /**
- * @param {{ level?: string, file?: string, pretty?: boolean }} [options]
+ * @param {{ level?: string, file?: string, pretty?: boolean, console?: boolean }} [options]
+ *        console: false → solo archivo (lo usan los scripts, que muestran su propia salida)
  */
-export function createLogger({ level = 'info', file, pretty = Boolean(process.stdout.isTTY) } = {}) {
-  const targets = [
-    pretty
-      ? {
-          target: 'pino-pretty',
-          level,
-          options: {
-            colorize: true,
-            translateTime: 'SYS:yyyy-mm-dd HH:MM:ss.l',
-            ignore: 'pid,hostname',
-          },
-        }
-      : { target: 'pino/file', level, options: { destination: 1 } }, // 1 = stdout
-  ];
+export function createLogger({
+  level = 'info',
+  file,
+  pretty = Boolean(process.stdout.isTTY),
+  console: toConsole = true,
+} = {}) {
+  const targets = [];
+  if (toConsole) {
+    targets.push(
+      pretty
+        ? {
+            target: 'pino-pretty',
+            level,
+            options: {
+              colorize: true,
+              translateTime: 'SYS:yyyy-mm-dd HH:MM:ss.l',
+              ignore: 'pid,hostname',
+            },
+          }
+        : { target: 'pino/file', level, options: { destination: 1 } }, // 1 = stdout
+    );
+  }
 
   if (file) {
     fs.mkdirSync(path.dirname(file), { recursive: true });

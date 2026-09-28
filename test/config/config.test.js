@@ -5,6 +5,7 @@ import {
   PROJECT_ROOT,
   describeConfig,
   loadConfig,
+  loadPaths,
 } from '../../src/config/index.js';
 import { testEnv } from '../helpers.js';
 
@@ -33,7 +34,8 @@ describe('loadConfig — valores por defecto', () => {
     expect(config.strategy).toEqual({ id: 'sma-cross', params: {} });
     expect(config.risk.maxTradeUsdt).toBe(50);
     expect(config.risk.maxDailyLossUsdt).toBe(20);
-    expect(config.risk.killSwitchFlatten).toBe(false);
+    expect(config.risk.maxOpenPositions).toBe(1);
+    expect(config.mode).toBe('dry-run');
     expect(config.execution).toEqual({ feeRate: 0.001, slippageBps: 5 });
   });
 
@@ -117,6 +119,19 @@ describe('loadConfig — validaciones', () => {
     expect(issuesOf({ STRATEGY_PARAMS: '[1,2]' }).join()).toMatch(/STRATEGY_PARAMS/);
   });
 
+  it('el modo separa lo simulado de lo enviado al exchange', () => {
+    const keys = { BINANCE_API_KEY: 'k', BINANCE_API_SECRET: 's' };
+    expect(load({ DRY_RUN: 'true' }).mode).toBe('dry-run');
+    expect(load({ DRY_RUN: 'false', ...keys }).mode).toBe('testnet');
+    expect(load({ DRY_RUN: 'false', BINANCE_ENV: 'demo', ...keys }).mode).toBe('demo');
+  });
+
+  it('valida MAX_OPEN_POSITIONS (entero ≥ 1)', () => {
+    expect(load({ MAX_OPEN_POSITIONS: '3' }).risk.maxOpenPositions).toBe(3);
+    expect(issuesOf({ MAX_OPEN_POSITIONS: '0' }).join()).toMatch(/MAX_OPEN_POSITIONS: debe ser ≥ 1/);
+    expect(issuesOf({ MAX_OPEN_POSITIONS: '1.5' }).join()).toMatch(/MAX_OPEN_POSITIONS: debe ser un entero/);
+  });
+
   it('valida montos de riesgo', () => {
     expect(issuesOf({ MAX_TRADE_USDT: '-5' }).join()).toMatch(/MAX_TRADE_USDT: debe ser mayor que 0/);
     expect(issuesOf({ MAX_DAILY_LOSS_USDT: '0' }).join()).toMatch(/MAX_DAILY_LOSS_USDT/);
@@ -158,5 +173,13 @@ describe('describeConfig', () => {
     expect(safe).not.toHaveProperty('apiSecret');
     expect(safe.credentials).toBe('configuradas');
     expect(describeConfig(load()).credentials).toBe('no configuradas');
+  });
+});
+
+describe('loadPaths (herramientas de emergencia)', () => {
+  it('lee las rutas aunque el resto de la config sea inválida', () => {
+    const paths = loadPaths({ BINANCE_ENV: 'mainnet', KILL_SWITCH_FILE: './tmp/PARAR' }); // sin STRATEGY
+    expect(paths.killSwitchFile).toBe(path.resolve(PROJECT_ROOT, 'tmp/PARAR'));
+    expect(paths.dbPath).toBe(path.resolve(PROJECT_ROOT, 'data/bot.db'));
   });
 });

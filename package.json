@@ -11,10 +11,14 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
+    "kill": "node scripts/kill.js",
+    "resume": "node scripts/resume.js",
+    "status": "node scripts/status.js",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
+    "better-sqlite3": "^13.0.3",
     "ccxt": "^4.5.84",
     "dotenv": "^18.0.4",
     "pino": "^10.3.1",
