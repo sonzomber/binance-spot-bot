@@ -2,7 +2,8 @@
  * Fábrica del cliente de trading (ccxt).
  *
  * Es el ÚNICO lugar donde el bot crea un cliente con API keys. Siempre sale en
- * Spot Testnet o Demo Mode, con la guardia de red instalada y verificada.
+ * Spot Testnet o Demo Mode, con la guardia de red instalada y verificada, y
+ * (si se entrega) con el limitador de peso conectado a cada petición.
  */
 import ccxt from 'ccxt';
 import {
@@ -13,9 +14,10 @@ import {
 
 /**
  * @param {object} config configuración validada (config/index.js)
+ * @param {{ limiter?: import('../data/rate-limiter.js').WeightLimiter }} [options]
  * @returns {import('ccxt').pro.binance}
  */
-export function createTradingExchange(config) {
+export function createTradingExchange(config, { limiter } = {}) {
   // Se usa la clase "pro" porque incluye REST + WebSockets en un solo cliente.
   const exchange = new ccxt.pro.binance({
     apiKey: config.apiKey,
@@ -40,7 +42,8 @@ export function createTradingExchange(config) {
       throw new SafetyError(`Entorno "${config.env}" no permitido. Solo testnet o demo.`);
   }
 
-  installRequestGuard(exchange, config.env);
+  installRequestGuard(exchange, config.env, { beforeRequest: limiter && (() => limiter.beforeRequest()) });
+  limiter?.attach(exchange);
   assertExchangeUrls(exchange, config.env);
   return exchange;
 }

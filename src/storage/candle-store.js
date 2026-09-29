@@ -49,6 +49,10 @@ export class CandleStore {
         `SELECT open_time FROM candles WHERE ${key} AND open_time >= @from AND open_time < @to
           ORDER BY open_time`,
       ),
+      last: db.prepare(
+        `SELECT open_time AS time, open, high, low, close, volume FROM candles
+          WHERE ${key} ORDER BY open_time DESC LIMIT @count`,
+      ),
       bounds: db.prepare(
         `SELECT MIN(open_time) AS first, MAX(open_time) AS last, COUNT(*) AS count
            FROM candles WHERE ${key}`,
@@ -96,6 +100,11 @@ export class CandleStore {
   /** Velas en [from, to) ordenadas por tiempo. */
   get(symbol, timeframe, { from, to }) {
     return this.sql.range.all({ env: this.env, symbol, timeframe, from, to });
+  }
+
+  /** Las últimas `count` velas guardadas, de la más antigua a la más reciente. */
+  last(symbol, timeframe, count) {
+    return this.sql.last.all({ env: this.env, symbol, timeframe, count }).reverse();
   }
 
   /** Primera y última vela guardadas (para descargas incrementales). */

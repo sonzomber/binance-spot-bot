@@ -8,6 +8,8 @@
 import { ConfigError, describeConfig, loadConfig, loadEnvFile } from './config/index.js';
 import { PreflightError, runPreflight } from './config/preflight.js';
 import { SafetyError } from './config/safety.js';
+import { WeightLimiter } from './data/rate-limiter.js';
+import { TimeSync } from './data/time-sync.js';
 import { createTradingExchange } from './lib/exchange.js';
 import { createLogger } from './lib/logger.js';
 import { RiskError, createRiskManager } from './risk/risk-manager.js';
@@ -49,6 +51,7 @@ async function main() {
 
   let exchange;
   let db;
+  let timeSync;
   try {
     // Primero lo que no usa red: si la estrategia no existe, ni siquiera se conecta.
     const strategy = await createStrategy(config.strategy.id, config.strategy.params);
@@ -62,8 +65,13 @@ async function main() {
     const risk = createRiskManager(config, db, logger);
     risk.assertCanStart();
 
-    exchange = createTradingExchange(config);
+    // Limitador de peso (cabeceras de Binance, 429/418) y hora del servidor.
+    const limiter = new WeightLimiter({ logger, now: () => (timeSync ? timeSync.now() : Date.now()) });
+    exchange = createTradingExchange(config, { limiter });
+    timeSync = new TimeSync({ exchange, logger });
     const { market } = await runPreflight(exchange, config, logger);
+    await timeSync.sync();
+    timeSync.start();
 
     // Con el precio actual: ¿alcanza MAX_TRADE_USDT para una orden válida? ¿se superó la pérdida diaria?
     const { last: price } = await exchange.fetchTicker(config.symbol);
@@ -93,6 +101,7 @@ async function main() {
     }
     process.exitCode = 1;
   } finally {
+    timeSync?.stop();
     await exchange?.close();
     db?.close();
   }

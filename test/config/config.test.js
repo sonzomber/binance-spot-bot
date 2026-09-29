@@ -143,6 +143,12 @@ describe('loadConfig — validaciones', () => {
     expect(issuesOf({ SLIPPAGE_BPS: '-1' }).join()).toMatch(/SLIPPAGE_BPS/);
   });
 
+  it('DATA_STALE_AFTER_SECONDS: en segundos, con límites razonables', () => {
+    expect(load().dataStaleAfterMs).toBe(60_000);
+    expect(load({ DATA_STALE_AFTER_SECONDS: '120' }).dataStaleAfterMs).toBe(120_000);
+    expect(issuesOf({ DATA_STALE_AFTER_SECONDS: '2' }).join()).toMatch(/DATA_STALE_AFTER_SECONDS: debe ser ≥ 5/);
+  });
+
   it('valida timeframe y feed', () => {
     expect(issuesOf({ TIMEFRAME: '7m' }).join()).toMatch(/TIMEFRAME/);
     expect(issuesOf({ DATA_FEED: 'grpc' }).join()).toMatch(/DATA_FEED/);

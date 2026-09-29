@@ -104,6 +104,8 @@ const envShape = z.object({
   DATA_FEED: envValue(
     z.preprocess(normalized, z.enum(['rest', 'ws'], { error: 'debe ser "rest" o "ws"' })).default('rest'),
   ),
+  // Si no llegan datos nuevos en este tiempo, se marcan como desactualizados y se bloquean órdenes.
+  DATA_STALE_AFTER_SECONDS: numberVar(60, (n) => n.min(5, 'debe ser ≥ 5').max(3600, 'debe ser ≤ 3600')),
 
   // Sin valor por defecto a propósito: la estrategia activa se elige explícitamente.
   // Que el nombre exista lo verifica el registro de estrategias al arrancar.
@@ -198,6 +200,7 @@ export function loadConfig(env = process.env) {
     symbol: e.SYMBOL,
     timeframe: e.TIMEFRAME,
     dataFeed: e.DATA_FEED,
+    dataStaleAfterMs: e.DATA_STALE_AFTER_SECONDS * 1000,
     strategy: { id: e.STRATEGY, params: e.STRATEGY_PARAMS },
     risk: {
       maxTradeUsdt: e.MAX_TRADE_USDT,

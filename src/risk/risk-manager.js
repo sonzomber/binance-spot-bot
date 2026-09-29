@@ -29,6 +29,7 @@ export const RiskCode = Object.freeze({
   NO_POSITION: 'NO_POSITION',
   EXCEEDS_POSITION: 'EXCEEDS_POSITION',
   MARKET_FILTER: 'MARKET_FILTER',
+  STALE_DATA: 'STALE_DATA',
 });
 
 export class RiskError extends Error {
@@ -54,8 +55,11 @@ export class RiskManager {
    * @param {number} deps.slippageBps slippage estimado en puntos básicos
    * @param {import('pino').Logger} deps.logger
    * @param {() => number} [deps.now] reloj inyectable (tests)
+   * @param {{ status: () => { stale: boolean, reason: string|null } }} [deps.dataHealth]
+   *        frescura de los datos de mercado: si están desactualizados, no se aceptan órdenes
    */
-  constructor({ store, killSwitch, limits, feeRate, slippageBps, logger, now = Date.now }) {
+  constructor({ store, killSwitch, limits, feeRate, slippageBps, logger, now = Date.now, dataHealth }) {
+    this.dataHealth = dataHealth;
     this.store = store;
     this.scope = store.scope;
     this.killSwitch = killSwitch;
@@ -200,6 +204,10 @@ export class RiskManager {
     }
     if (this.killSwitch.isActive()) {
       return reject(RiskCode.KILL_SWITCH, `kill switch activo: ${this.killSwitch.read().reason}`);
+    }
+    const health = this.dataHealth?.status();
+    if (health?.stale) {
+      return reject(RiskCode.STALE_DATA, `datos de mercado desactualizados: ${health.reason}`);
     }
     const daily = this.dailyPnl({ [symbol]: price, ...markPrices });
     if (this.isDailyLossReached(daily)) {
@@ -411,7 +419,7 @@ function assertFill({ qty, price, feeQuote }) {
 }
 
 /** Arma el RiskManager a partir de la config y una base de datos abierta. */
-export function createRiskManager(config, db, logger, { now } = {}) {
+export function createRiskManager(config, db, logger, { now, dataHealth } = {}) {
   return new RiskManager({
     store: new RiskStore(db, { env: config.env, mode: config.mode }),
     killSwitch: new KillSwitch(config.risk.killSwitchFile),
@@ -424,5 +432,6 @@ export function createRiskManager(config, db, logger, { now } = {}) {
     slippageBps: config.execution.slippageBps,
     logger,
     now,
+    dataHealth,
   });
 }

@@ -16,6 +16,7 @@ o [Demo Mode](https://demo.binance.com) — y se niega a arrancar con cualquier 
 | `npm run kill -- "motivo"` | Kill switch: detiene el bot de forma segura |
 | `npm run resume` | Reanuda después de una parada (acción manual obligatoria) |
 | `npm run status` | Muestra el estado de riesgo: parada, PnL del día, posiciones |
+| `npm run feed` | Monitor de datos de mercado (solo lectura): velas cerradas, precio, estado |
 | `npm test` | Ejecuta las pruebas |
 
 ## Gestión de riesgo
@@ -28,6 +29,7 @@ no se cumple, la orden se rechaza con un código y un motivo en el log.
 | Regla | Configuración | Aplica a |
 |---|---|---|
 | Bot detenido o kill switch activo | — | compras y ventas |
+| Datos de mercado desactualizados | `DATA_STALE_AFTER_SECONDS` (60) | compras y ventas |
 | Pérdida máxima diaria | `MAX_DAILY_LOSS_USDT` (20) | compras y ventas |
 | Monto máximo por operación | `MAX_TRADE_USDT` (50) | compras |
 | Máximo de posiciones abiertas | `MAX_OPEN_POSITIONS` (1) | compras |
@@ -161,3 +163,55 @@ repetir una descarga no crea duplicados. Antes de un backtest se buscan
 **huecos** (velas faltantes en el rango) y se muestra un aviso con cada hueco y
 el porcentaje faltante: un hueco puede ser real (mantenimiento de Binance) o un
 error de descarga, y en ambos casos el backtest saltaría ese periodo.
+
+## Datos de mercado
+
+Todo el flujo de datos está en [src/data/](src/data/). La estrategia **solo recibe
+velas cerradas**: la vela en curso cambia hasta su cierre y una señal basada en
+ella podría desaparecer.
+
+### Fuentes (`DATA_FEED`)
+
+| Modo | Cómo llegan las velas |
+|---|---|
+| `rest` (por defecto) | consulta REST ~2 s después de cada cierre, más una consulta de precio cada 15 s |
+| `ws` | stream WebSocket `<par>@kline_<intervalo>`; REST solo para rellenar huecos |
+
+En modo `ws` se usa un cliente propio (paquete `ws`) en lugar de `watchOHLCV` de
+ccxt, porque ccxt descarta el campo `x` con el que Binance indica si la vela
+está cerrada. Las actualizaciones de la vela en curso solo actualizan el precio.
+
+### Conexión WebSocket
+
+- **Pings:** Binance envía un ping cada ~20 s y corta si no recibe el pong; el bot
+  responde cada uno.
+- **Cierre a las 24 h:** Binance corta toda conexión a las 24 h. El bot la rota
+  por su cuenta a las 23 h y, si igual se corta, reconecta.
+- **Conexión zombi:** sin mensajes ni pings durante 60 s, se fuerza la reconexión.
+- **Reconexión** automática con backoff exponencial (1 s, 2 s, 4 s… hasta 60 s) y
+  jitter (una parte al azar, para no reintentar todos a la vez).
+- **Relleno de huecos:** al reconectar, las velas cerradas durante el corte se
+  descargan por REST (solo las que faltan en el caché, sin duplicados) **antes**
+  de reanudar. Solo se emite la más reciente: una señal de hace varias velas no
+  se ejecuta tarde.
+
+### Límites de la API
+
+- El peso usado se lee de la cabecera `X-MBX-USED-WEIGHT-1M` de cada respuesta.
+  Al llegar al 80% del límite (6000 por minuto), el bot espera al minuto siguiente.
+- **429** (demasiadas peticiones): se espera lo que indica `Retry-After`.
+- **418** (IP bloqueada por ignorar los 429): se detienen **todas** las peticiones y
+  se registra un error con la hora de fin del bloqueo.
+
+### Hora del servidor
+
+La hora se sincroniza con Binance al arrancar y cada 30 minutos (compensando la
+latencia de la red). Se usa para firmar las peticiones (evita el error `-1021`
+de timestamp) y para decidir cuándo una vela está cerrada.
+
+### Datos desactualizados
+
+Si pasan más de `DATA_STALE_AFTER_SECONDS` sin señales de la fuente (mensajes,
+pings o respuestas REST), o sin la última vela cerrada, los datos se marcan
+**desactualizados** y el gestor de riesgo **bloquea toda orden nueva** hasta que
+se recuperen. También están bloqueadas mientras se rellenan huecos.

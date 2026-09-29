@@ -111,8 +111,10 @@ export function assertExchangeUrls(exchange, env) {
  * Instala la guardia en tiempo de ejecución sobre un cliente ccxt.
  * Tras esto, cualquier request REST o conexión WebSocket fuera de la lista
  * blanca falla ANTES de salir de la máquina.
+ * @param {{ beforeRequest?: (url: string) => Promise<void> }} [hooks] se ejecuta antes de
+ *        cada petición REST permitida (el limitador de peso lo usa para esperar)
  */
-export function installRequestGuard(exchange, env) {
+export function installRequestGuard(exchange, env, { beforeRequest } = {}) {
   if (!ALLOWED_HOSTS[env]) assertAllowedUrl('https://invalid.invalid', env); // lanza el error de entorno
   if (exchange[GUARD_MARK]) {
     throw new SafetyError('La guardia de red ya está instalada en este cliente.');
@@ -122,7 +124,8 @@ export function installRequestGuard(exchange, env) {
   const originalClient = exchange.client.bind(exchange);
 
   const guardedFetch = async (url, ...rest) => {
-    assertAllowedUrl(url, env);
+    assertAllowedUrl(url, env); // primero la guardia: una URL prohibida no espera ni cuenta peso
+    await beforeRequest?.(url); // p. ej. el limitador de peso (src/data/rate-limiter.js)
     return originalFetch(url, ...rest);
   };
   const guardedClient = (url) => {
