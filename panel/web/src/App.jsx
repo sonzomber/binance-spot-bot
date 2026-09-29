@@ -47,7 +47,7 @@ export function App() {
 }
 
 /** Pestaña actual desde la URL (#/bot, #/backtests): sobrevive a una recarga. */
-const tabFromHash = () => (globalThis.location?.hash === '#/backtests' ? 'backtests' : 'bot');
+const tabFromHash = () => (globalThis.location?.hash?.startsWith('#/backtests') ? 'backtests' : 'bot');
 
 function readStoredScope() {
   try {
