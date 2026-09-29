@@ -1,14 +1,16 @@
 /**
  * Punto de entrada del bot.
  *
- * Orden de arranque: .env → config validada → logger → estrategia → estado de
- * riesgo guardado → cliente con guardia → preflight → límites de riesgo.
+ * Orden de arranque: .env → config validada → logger → (advertencia si el dry-run
+ * está desactivado) → estrategia → estado de riesgo guardado → cliente con
+ * guardia → preflight → reconciliación con el exchange → límites de riesgo.
  * Si cualquier paso falla, el bot no arranca.
  */
 import { ConfigError, describeConfig, loadConfig, loadEnvFile } from './config/index.js';
 import { PreflightError, runPreflight } from './config/preflight.js';
 import { SafetyError } from './config/safety.js';
 import { WeightLimiter } from './data/rate-limiter.js';
+import { createExecution } from './execution/index.js';
 import { TimeSync } from './data/time-sync.js';
 import { createTradingExchange } from './lib/exchange.js';
 import { createLogger } from './lib/logger.js';
@@ -43,11 +45,11 @@ async function main() {
     logger.warn('No se encontró .env: se usan variables de entorno y valores por defecto.');
   }
   logger.info({ config: describeConfig(config) }, 'Configuración cargada');
-  logger.info(
-    config.dryRun
-      ? 'Modo DRY-RUN: las órdenes se simulan, no se envía nada al exchange.'
-      : `Modo TESTNET real: las órdenes se envían a ${config.env} (fondos ficticios).`,
-  );
+  if (config.dryRun) {
+    logger.info('Modo DRY-RUN: las órdenes se simulan (con comisión y slippage), no se envía nada al exchange.');
+  } else {
+    await warnOrdersEnabled(config, logger);
+  }
 
   let exchange;
   let db;
@@ -81,9 +83,21 @@ async function main() {
       { price, amount: size.amount, estimatedCost: Number(size.estimatedCost.toFixed(4)) },
       `Tamaño de compra con MAX_TRADE_USDT=${config.risk.maxTradeUsdt}`,
     );
+    // Ejecución (dry-run o exchange) y reconciliación: sin diferencias, no se opera.
+    // (el módulo 7 conectará getPrice al feed de datos en vivo)
+    const { executor, reconciler } = createExecution({
+      config, db, exchange, market, risk, logger, getPrice: () => price,
+    });
+    const report = await reconciler.run();
+    if (!report.ok) {
+      logger.fatal('El bot no opera: hay diferencias con el exchange. Revísalas con "npm run reconcile".');
+      process.exitCode = 1;
+      return;
+    }
+
     const limits = await risk.enforceLimits({
       markPrices: { [config.symbol]: price },
-      cancelOpenOrders: async () => [], // el módulo de ejecución (6) cancelará las órdenes reales
+      cancelOpenOrders: () => executor.cancelAll(),
     });
     if (limits.halted) {
       process.exitCode = 1;
@@ -104,6 +118,28 @@ async function main() {
     timeSync?.stop();
     await exchange?.close();
     db?.close();
+  }
+}
+
+/**
+ * Dry-run desactivado: advertencia imposible de pasar por alto y 5 s para
+ * cancelar con Ctrl+C antes de que el bot pueda enviar órdenes.
+ */
+async function warnOrdersEnabled(config, logger) {
+  const line = '='.repeat(72);
+  logger.warn(
+    [
+      line,
+      `  DRY-RUN DESACTIVADO: el bot ENVIARÁ ÓRDENES a ${config.env.toUpperCase()} (${config.env === 'testnet' ? 'testnet.binance.vision' : 'demo.binance.com'}).`,
+      '  Los fondos son ficticios, pero las órdenes son reales en ese entorno.',
+      `  Máximo por operación: ${config.risk.maxTradeUsdt} USDT · pérdida diaria máxima: ${config.risk.maxDailyLossUsdt} USDT.`,
+      '  Para volver a simular: DRY_RUN=true en el .env.',
+      line,
+    ].join('\n'),
+  );
+  for (let seconds = 5; seconds > 0; seconds--) {
+    logger.warn(`Arrancando en ${seconds} s… (Ctrl+C para cancelar)`);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
   }
 }
 

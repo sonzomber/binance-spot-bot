@@ -85,7 +85,14 @@ const envShape = z.object({
   BINANCE_API_KEY: envValue(z.string().trim().optional()),
   BINANCE_API_SECRET: envValue(z.string().trim().optional()),
 
-  DRY_RUN: booleanVar(true),
+  // Desactivar el dry-run exige escribir exactamente DRY_RUN=false: valores como 0, no u
+  // off (o un error de tipeo) no desactivan la simulación, dan error.
+  DRY_RUN: envValue(
+    z
+      .preprocess(normalized, z.enum(['true', 'false'], { error: 'debe ser exactamente "true" o "false"' }))
+      .transform((value) => value === 'true')
+      .default(true),
+  ),
 
   SYMBOL: envValue(
     z

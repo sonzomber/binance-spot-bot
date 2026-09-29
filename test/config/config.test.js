@@ -95,17 +95,20 @@ describe('loadConfig — validaciones', () => {
     expect(config.dryRun).toBe(false);
   });
 
-  it.each([
-    ['true', true], ['TRUE', true], ['1', true], ['yes', true],
-    ['false', false], ['0', false], ['no', false],
-  ])('interpreta DRY_RUN=%s como %s', (value, expected) => {
-    const keys = { BINANCE_API_KEY: 'k', BINANCE_API_SECRET: 's' };
-    expect(load({ DRY_RUN: value, ...keys }).dryRun).toBe(expected);
-  });
+  it.each([['true', true], ['TRUE', true], [' false ', false], ['False', false]])(
+    'interpreta DRY_RUN=%j como %s',
+    (value, expected) => {
+      const keys = { BINANCE_API_KEY: 'k', BINANCE_API_SECRET: 's' };
+      expect(load({ DRY_RUN: value, ...keys }).dryRun).toBe(expected);
+    },
+  );
 
-  it('rechaza booleanos ambiguos', () => {
-    expect(issuesOf({ DRY_RUN: 'maybe' }).join()).toMatch(/DRY_RUN: debe ser true o false/);
-  });
+  it.each(['0', 'no', 'off', '1', 'yes', 'flase', 'maybe'])(
+    'desactivar el dry-run exige escribir exactamente "false": DRY_RUN=%s es un error',
+    (value) => {
+      expect(issuesOf({ DRY_RUN: value }).join()).toMatch(/DRY_RUN: debe ser exactamente "true" o "false"/);
+    },
+  );
 
   it('normaliza el símbolo y exige cotización en USDT', () => {
     expect(load({ SYMBOL: 'eth/usdt' }).symbol).toBe('ETH/USDT');

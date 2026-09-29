@@ -73,6 +73,23 @@ export class RiskStore {
            exit_day = @exitDay, exit_order_id = @exitOrderId, realized_pnl = @realizedPnl
          WHERE ${where} AND id = @id AND status = 'open'`,
       ),
+      reducePosition: db.prepare(
+        `UPDATE positions SET qty = qty - @soldQty, entry_cost = entry_cost - @soldCost,
+           entry_fee = entry_fee - @soldEntryFee
+         WHERE ${where} AND id = @id AND status = 'open' AND qty > @soldQty`,
+      ),
+      insertClosedPart: db.prepare(
+        `INSERT INTO positions (env, mode, symbol, status, qty, entry_price, entry_fee, entry_cost, entry_time,
+                                entry_order_id, exit_qty, exit_price, exit_fee, exit_proceeds, exit_time,
+                                exit_day, exit_order_id, realized_pnl)
+         SELECT env, mode, symbol, 'closed', @soldQty, entry_price, @soldEntryFee, @soldCost, entry_time,
+                entry_order_id, @exitQty, @exitPrice, @exitFee, @exitProceeds, @exitTime,
+                @exitDay, @exitOrderId, @realizedPnl
+           FROM positions WHERE ${where} AND id = @id`,
+      ),
+      appliedOrder: db.prepare(
+        `SELECT 1 FROM positions WHERE ${where} AND (entry_order_id = @orderId OR exit_order_id = @orderId) LIMIT 1`,
+      ),
       realizedForDay: db.prepare(
         `SELECT COALESCE(SUM(realized_pnl), 0) AS pnl,
                 COALESCE(SUM(entry_fee + exit_fee), 0) AS fees,
@@ -157,6 +174,30 @@ export class RiskStore {
     });
     if (changes !== 1) throw new Error(`La posición ${id} no existe en este ámbito o ya estaba cerrada`);
     return toPosition(this.sql.getPosition.get({ ...this.scope, id }));
+  }
+
+  /**
+   * Venta parcial: la parte vendida pasa a una fila CERRADA (con su parte del costo)
+   * y la posición original sigue abierta con lo que queda. Todo en una transacción.
+   * @returns la fila cerrada nueva
+   */
+  splitPosition(id, { soldQty, soldCost, soldEntryFee, exitQty, exitPrice, exitFee, exitProceeds, exitTime,
+    exitDay, exitOrderId = null, realizedPnl }) {
+    return this.db.transaction(() => {
+      const params = {
+        ...this.scope, id, soldQty, soldCost, soldEntryFee, exitQty, exitPrice, exitFee, exitProceeds,
+        exitTime: iso(exitTime), exitDay, exitOrderId, realizedPnl,
+      };
+      const { lastInsertRowid } = this.sql.insertClosedPart.run(params);
+      const { changes } = this.sql.reducePosition.run(params);
+      if (changes !== 1) throw new Error(`La posición ${id} no existe en este ámbito, no está abierta o no tiene ${soldQty}`);
+      return toPosition(this.sql.getPosition.get({ ...this.scope, id: lastInsertRowid }));
+    })();
+  }
+
+  /** ¿Esta orden ya se aplicó a alguna posición (como entrada o salida)? */
+  isOrderApplied(orderId) {
+    return this.sql.appliedOrder.get({ ...this.scope, orderId }) !== undefined;
   }
 
   /** PnL realizado (neto de comisiones) de las posiciones cerradas en un día UTC. */

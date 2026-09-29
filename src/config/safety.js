@@ -111,8 +111,9 @@ export function assertExchangeUrls(exchange, env) {
  * Instala la guardia en tiempo de ejecución sobre un cliente ccxt.
  * Tras esto, cualquier request REST o conexión WebSocket fuera de la lista
  * blanca falla ANTES de salir de la máquina.
- * @param {{ beforeRequest?: (url: string) => Promise<void> }} [hooks] se ejecuta antes de
- *        cada petición REST permitida (el limitador de peso lo usa para esperar)
+ * @param {{ beforeRequest?: (url: string, method: string, headers: object, body: string) => Promise<void> }} [hooks]
+ *        se ejecuta antes de cada petición REST permitida: el filtro de órdenes (src/execution/order-gate.js)
+ *        y el limitador de peso (src/data/rate-limiter.js)
  */
 export function installRequestGuard(exchange, env, { beforeRequest } = {}) {
   if (!ALLOWED_HOSTS[env]) assertAllowedUrl('https://invalid.invalid', env); // lanza el error de entorno
@@ -123,13 +124,18 @@ export function installRequestGuard(exchange, env, { beforeRequest } = {}) {
   const originalFetch = exchange.fetch.bind(exchange);
   const originalClient = exchange.client.bind(exchange);
 
-  const guardedFetch = async (url, ...rest) => {
+  const guardedFetch = async (url, method, headers, body) => {
     assertAllowedUrl(url, env); // primero la guardia: una URL prohibida no espera ni cuenta peso
-    await beforeRequest?.(url); // p. ej. el limitador de peso (src/data/rate-limiter.js)
-    return originalFetch(url, ...rest);
+    await beforeRequest?.(url, method, headers, body);
+    return originalFetch(url, method, headers, body);
   };
   const guardedClient = (url) => {
-    assertAllowedUrl(url, env);
+    const parsed = assertAllowedUrl(url, env);
+    // La WebSocket API permite crear órdenes por fuera de REST, donde está el filtro
+    // de órdenes. El bot no la usa: se bloquea para que no exista ese camino.
+    if (parsed.pathname.startsWith('/ws-api')) {
+      throw new SafetyError('WebSocket API bloqueada: toda orden debe pasar por REST y por el gestor de riesgo.');
+    }
     return originalClient(url);
   };
 

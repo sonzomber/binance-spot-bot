@@ -2,8 +2,9 @@
  * Fábrica del cliente de trading (ccxt).
  *
  * Es el ÚNICO lugar donde el bot crea un cliente con API keys. Siempre sale en
- * Spot Testnet o Demo Mode, con la guardia de red instalada y verificada, y
- * (si se entrega) con el limitador de peso conectado a cada petición.
+ * Spot Testnet o Demo Mode, con la guardia de red instalada y verificada, el
+ * filtro de órdenes (ninguna orden sale sin aprobación del riesgo) y, si se
+ * entrega, el limitador de peso conectado a cada petición.
  */
 import ccxt from 'ccxt';
 import {
@@ -11,6 +12,7 @@ import {
   assertExchangeUrls,
   installRequestGuard,
 } from '../config/safety.js';
+import { installOrderGate } from '../execution/order-gate.js';
 
 /**
  * @param {object} config configuración validada (config/index.js)
@@ -42,7 +44,14 @@ export function createTradingExchange(config, { limiter } = {}) {
       throw new SafetyError(`Entorno "${config.env}" no permitido. Solo testnet o demo.`);
   }
 
-  installRequestGuard(exchange, config.env, { beforeRequest: limiter && (() => limiter.beforeRequest()) });
+  // Las órdenes reales solo existen en modo "exchange": el filtro valida aprobaciones de ese ámbito.
+  const orderGate = installOrderGate(exchange, { env: config.env, mode: 'exchange' });
+  installRequestGuard(exchange, config.env, {
+    beforeRequest: async (url, method, headers, body) => {
+      orderGate.check(url, method, body); // antes de esperar por el limitador: lo prohibido no espera
+      await limiter?.beforeRequest();
+    },
+  });
   limiter?.attach(exchange);
   assertExchangeUrls(exchange, config.env);
   return exchange;

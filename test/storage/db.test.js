@@ -24,7 +24,7 @@ describe('migraciones versionadas', () => {
     expect(info.history.map((m) => m.version)).toEqual(MIGRATIONS.map((m) => m.version));
     expect(info.history.every((m) => m.applied_at)).toBe(true);
     expect(tableNames(db)).toEqual(
-      ['candles', 'events', 'order_fills', 'orders', 'positions', 'risk_state', 'schema_migrations'],
+      ['balance_snapshots', 'candles', 'events', 'order_fills', 'orders', 'positions', 'risk_state', 'schema_migrations'],
     );
   });
 
@@ -85,7 +85,7 @@ describe('migración v1 → v2 con datos existentes', () => {
     db.prepare("UPDATE risk_state SET halted = 1, halt_code = 'KILL_SWITCH', halt_reason = 'viejo', halted_at = 'x'").run();
     db.prepare("INSERT INTO events (time, type, message) VALUES ('t', 'HALT', 'viejo')").run();
 
-    expect(migrate(db)).toBe(2);
+    expect(migrate(db)).toBe(MIGRATIONS.length);
 
     expect(db.prepare('SELECT id, env, mode, entry_cost FROM positions ORDER BY id').all()).toEqual([
       { id: 7, env: 'testnet', mode: 'dry-run', entry_cost: 50.05 },
@@ -100,8 +100,10 @@ describe('migración v1 → v2 con datos existentes', () => {
       { env: 'testnet', mode: 'exchange', halted: 1, halt_reason: 'viejo' },
     ]);
     expect(db.prepare('SELECT env, mode, message FROM events').get()).toEqual({ env: 'testnet', mode: 'dry-run', message: 'viejo' });
-    // el historial registra la v1 (aplicada antes de existir el historial) y la v2
-    expect(schemaInfo(db).history.map((m) => [m.version, m.applied_at === null])).toEqual([[1, true], [2, false]]);
+    // el historial registra la v1 (aplicada antes de existir el historial) y las siguientes
+    expect(schemaInfo(db).history.map((m) => [m.version, m.applied_at === null])).toEqual(
+      MIGRATIONS.map((m) => [m.version, m.version === 1]),
+    );
     // los ids nuevos siguen después de los existentes
     db.prepare(
       `INSERT INTO positions (env, mode, symbol, status, qty, entry_price, entry_fee, entry_cost, entry_time)

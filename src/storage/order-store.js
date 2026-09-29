@@ -68,6 +68,7 @@ function toOrder(row, fills) {
     rejectReason: row.reject_reason,
     strategy: row.strategy,
     signalCode: row.signal_code,
+    signalKey: row.signal_key,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     acceptedAt: row.accepted_at,
@@ -102,13 +103,14 @@ export class OrderStore {
     this.sql = {
       insert: db.prepare(
         `INSERT INTO orders (env, mode, client_order_id, symbol, side, type, amount, price, status,
-                             reject_source, reject_code, reject_reason, strategy, signal_code,
+                             reject_source, reject_code, reject_reason, strategy, signal_code, signal_key,
                              created_at, updated_at, closed_at)
            VALUES (@env, @mode, @clientOrderId, @symbol, @side, @type, @amount, @price, @status,
-                   @rejectSource, @rejectCode, @rejectReason, @strategy, @signalCode,
+                   @rejectSource, @rejectCode, @rejectReason, @strategy, @signalCode, @signalKey,
                    @time, @time, @closedAt)`,
       ),
       byClientId: db.prepare(`SELECT * FROM orders WHERE ${where} AND client_order_id = @clientOrderId`),
+      bySignalKey: db.prepare(`SELECT client_order_id FROM orders WHERE ${where} AND signal_key = @signalKey`),
       byExchangeId: db.prepare(`SELECT * FROM orders WHERE ${where} AND exchange_order_id = @exchangeOrderId`),
       fills: db.prepare(
         `SELECT * FROM order_fills WHERE ${where} AND order_id = @orderId ORDER BY time, id`,
@@ -139,8 +141,13 @@ export class OrderStore {
          WHERE ${where} AND id = @id`,
       ),
       active: db.prepare(
-        `SELECT * FROM orders WHERE ${where}
+        `SELECT * FROM orders WHERE ${where} AND (@symbol IS NULL OR symbol = @symbol)
            AND status IN (${ACTIVE_STATUSES.map((s) => `'${s}'`).join(', ')}) ORDER BY id`,
+      ),
+      fillsSince: db.prepare(
+        `SELECT o.symbol, o.side, f.qty, f.price, f.fee_amount, f.fee_currency, f.time
+           FROM order_fills f JOIN orders o ON o.id = f.order_id
+          WHERE f.env = @env AND f.mode = @mode AND f.time > @since ORDER BY f.time, f.id`,
       ),
       list: db.prepare(
         `SELECT * FROM orders WHERE ${where} AND created_at >= @from AND created_at < @to ORDER BY id`,
@@ -180,17 +187,18 @@ export class OrderStore {
   }
 
   #insert({ clientOrderId, symbol, side, type, amount, price = null, strategy = null, signalCode = null,
-    status, rejectSource = null, rejectCode = null, rejectReason = null }) {
+    signalKey = null, status, rejectSource = null, rejectCode = null, rejectReason = null }) {
     const time = iso(this.now());
     try {
       this.sql.insert.run({
         ...this.scope, clientOrderId, symbol, side, type, amount, price, status,
-        rejectSource, rejectCode, rejectReason, strategy, signalCode,
+        rejectSource, rejectCode, rejectReason, strategy, signalCode, signalKey,
         time, closedAt: FINAL_STATUSES.includes(status) ? time : null,
       });
     } catch (err) {
       if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
-        throw new OrderStoreError(`clientOrderId duplicado: ${clientOrderId}`);
+        const what = /signal_key/.test(err.message) ? `señal duplicada: ${signalKey}` : `clientOrderId duplicado: ${clientOrderId}`;
+        throw new OrderStoreError(what);
       }
       throw err;
     }
@@ -282,8 +290,19 @@ export class OrderStore {
   }
 
   /** Órdenes vivas (pending/open/partially_filled): las que una parada debe cancelar. */
-  activeOrders() {
-    return this.sql.active.all(this.scope).map((row) => toOrder(row));
+  activeOrders(symbol = null) {
+    return this.sql.active.all({ ...this.scope, symbol }).map((row) => toOrder(row));
+  }
+
+  /** La orden que ya produjo esta señal, si existe (evita reenviar la misma señal). */
+  getBySignalKey(signalKey) {
+    const row = this.sql.bySignalKey.get({ ...this.scope, signalKey });
+    return row ? this.get(row.client_order_id) : null;
+  }
+
+  /** Ejecuciones registradas después de `since` (ms), con el lado de su orden. */
+  fillsSince(since) {
+    return this.sql.fillsSince.all({ ...this.scope, since: iso(since) });
   }
 
   /** Órdenes creadas en [from, to) (ms). */

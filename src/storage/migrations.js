@@ -224,4 +224,30 @@ export const MIGRATIONS = Object.freeze([
   ) WITHOUT ROWID;
   `,
   },
+
+  {
+    version: 3,
+    name: 'clave de señal en órdenes y fotos de saldos para la reconciliación (módulo 6)',
+    sql: `
+  -- 1. Una señal de la estrategia (estrategia + par + vela + acción) produce como
+  --    máximo UNA orden: un reenvío de la misma señal choca con este índice.
+  ALTER TABLE orders ADD COLUMN signal_key TEXT;
+  CREATE UNIQUE INDEX ux_orders_signal_key ON orders (env, mode, signal_key)
+    WHERE signal_key IS NOT NULL;
+
+  -- 2. Saldos de referencia del exchange. El saldo esperado es la última foto más
+  --    las ejecuciones registradas desde entonces; si no coincide con Binance, hay
+  --    una diferencia que resolver antes de operar.
+  CREATE TABLE balance_snapshots (
+    id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    env    TEXT NOT NULL CHECK (env IN ('testnet', 'demo')),
+    mode   TEXT NOT NULL CHECK (mode IN ('dry-run', 'exchange')),
+    asset  TEXT NOT NULL,
+    amount REAL NOT NULL CHECK (amount >= 0),               -- saldo total (libre + en órdenes)
+    time   TEXT NOT NULL,
+    reason TEXT NOT NULL                                    -- p. ej. "referencia inicial", "aceptado manualmente"
+  );
+  CREATE INDEX idx_balance_snapshots_scope ON balance_snapshots (env, mode, asset, id);
+  `,
+  },
 ]);

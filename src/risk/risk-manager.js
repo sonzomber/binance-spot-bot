@@ -30,6 +30,9 @@ export const RiskCode = Object.freeze({
   EXCEEDS_POSITION: 'EXCEEDS_POSITION',
   MARKET_FILTER: 'MARKET_FILTER',
   STALE_DATA: 'STALE_DATA',
+  RECONCILIATION: 'RECONCILIATION',
+  DUPLICATE_SIGNAL: 'DUPLICATE_SIGNAL',
+  ORDER_IN_FLIGHT: 'ORDER_IN_FLIGHT',
 });
 
 export class RiskError extends Error {
@@ -39,7 +42,56 @@ export class RiskError extends Error {
   }
 }
 
-const approve = () => Object.freeze({ ok: true, code: RiskCode.OK });
+/** Alguien intentó enviar una orden sin una aprobación válida del gestor de riesgo. */
+export class RiskBypassError extends Error {
+  constructor(message) {
+    super(`Orden bloqueada: ${message}. Toda orden debe pasar por el gestor de riesgo.`);
+    this.name = 'RiskBypassError';
+  }
+}
+
+// --- Aprobaciones ------------------------------------------------------------------
+// Una aprobación es la "llave" que exige cualquier envío de órdenes (simulado o real).
+// Solo checkOrder() puede crearlas: el registro de aprobaciones auténticas es privado
+// de este módulo (no se exporta), así que no se pueden fabricar desde afuera. Cada
+// una sirve para UNA orden exacta (mismo clientOrderId, lado, cantidad…), una sola
+// vez y por poco tiempo.
+const genuineApprovals = new WeakSet();
+const usedApprovals = new WeakSet();
+const APPROVAL_TTL_MS = 30_000;
+const APPROVAL_FIELDS = ['clientOrderId', 'symbol', 'side', 'type', 'amount', 'price'];
+
+function issueApproval(order, scope, now) {
+  const approval = Object.freeze({
+    ...Object.fromEntries(APPROVAL_FIELDS.map((field) => [field, order[field]])),
+    env: scope.env,
+    mode: scope.mode,
+    issuedAt: now,
+  });
+  genuineApprovals.add(approval);
+  return approval;
+}
+
+/**
+ * Verifica y CONSUME una aprobación antes de enviar una orden.
+ * @throws {RiskBypassError} si no es auténtica, ya se usó, venció o no coincide con la orden
+ */
+export function consumeApproval(approval, order, { scope, now = Date.now() } = {}) {
+  if (!approval || !genuineApprovals.has(approval)) throw new RiskBypassError('sin aprobación auténtica del gestor de riesgo');
+  if (usedApprovals.has(approval)) throw new RiskBypassError(`la aprobación de ${approval.clientOrderId} ya se usó (reenvío bloqueado)`);
+  if (now - approval.issuedAt > APPROVAL_TTL_MS) throw new RiskBypassError('la aprobación venció: hay que volver a evaluar el riesgo');
+  for (const field of APPROVAL_FIELDS) {
+    if (approval[field] !== order[field]) {
+      throw new RiskBypassError(`la orden no coincide con lo aprobado (${field}: ${order[field]} ≠ ${approval[field]})`);
+    }
+  }
+  if (scope && (approval.env !== scope.env || approval.mode !== scope.mode)) {
+    throw new RiskBypassError(`aprobación de otro entorno (${approval.env}/${approval.mode})`);
+  }
+  usedApprovals.add(approval);
+  return true;
+}
+
 const reject = (code, reason, extra = {}) => Object.freeze({ ok: false, code, reason, ...extra });
 const usdt = (value) => `${value.toFixed(2)} USDT`;
 const iso = (ms) => new Date(ms).toISOString();
@@ -57,9 +109,12 @@ export class RiskManager {
    * @param {() => number} [deps.now] reloj inyectable (tests)
    * @param {{ status: () => { stale: boolean, reason: string|null } }} [deps.dataHealth]
    *        frescura de los datos de mercado: si están desactualizados, no se aceptan órdenes
+   * @param {{ status: () => { ok: boolean, reason: string|null } }} [deps.reconciliation]
+   *        reconciliación con el exchange: si hay diferencias sin resolver, no se aceptan órdenes
    */
-  constructor({ store, killSwitch, limits, feeRate, slippageBps, logger, now = Date.now, dataHealth }) {
+  constructor({ store, killSwitch, limits, feeRate, slippageBps, logger, now = Date.now, dataHealth, reconciliation }) {
     this.dataHealth = dataHealth;
+    this.reconciliation = reconciliation;
     this.store = store;
     this.scope = store.scope;
     this.killSwitch = killSwitch;
@@ -180,12 +235,16 @@ export class RiskManager {
   // --- Validación antes de cada orden ---------------------------------------------
 
   /**
-   * @param {{ symbol: string, side: 'buy'|'sell', type: 'market'|'limit', amount: number, price: number }} order
+   * @param {{ symbol: string, side: 'buy'|'sell', type: 'market'|'limit', amount: number, price: number,
+   *           clientOrderId?: string }} order
    *        price: precio límite, o precio estimado de ejecución si es de mercado
-   * @param {{ market: object, markPrices?: Record<string, number>, freeQuote?: number }} context
-   * @returns {{ ok: boolean, code: string, reason?: string }}
+   * @param {{ market: object, markPrices?: Record<string, number>, freeQuote?: number,
+   *           activeOrders?: number, duplicateOf?: object }} context
+   *        activeOrders: órdenes vivas del par; duplicateOf: orden que ya produjo esta señal
+   * @returns {{ ok: boolean, code: string, reason?: string, approval?: object }}
+   *          si la orden trae clientOrderId y se aprueba, incluye la aprobación de un solo uso
    */
-  checkOrder(order, { market, markPrices = {}, freeQuote } = {}) {
+  checkOrder(order, { market, markPrices = {}, freeQuote, activeOrders = 0, duplicateOf = null } = {}) {
     const { symbol, side, type, amount, price } = order ?? {};
     if (!['buy', 'sell'].includes(side) || !['market', 'limit'].includes(type)) {
       return reject(RiskCode.INVALID_ORDER, `orden inválida: side=${side}, type=${type}`);
@@ -205,9 +264,21 @@ export class RiskManager {
     if (this.killSwitch.isActive()) {
       return reject(RiskCode.KILL_SWITCH, `kill switch activo: ${this.killSwitch.read().reason}`);
     }
+    const reconciliation = this.reconciliation?.status();
+    if (reconciliation && !reconciliation.ok) {
+      return reject(RiskCode.RECONCILIATION, `reconciliación con el exchange pendiente: ${reconciliation.reason}`);
+    }
     const health = this.dataHealth?.status();
     if (health?.stale) {
       return reject(RiskCode.STALE_DATA, `datos de mercado desactualizados: ${health.reason}`);
+    }
+    // Idempotencia: una señal produce como máximo una orden, y no se envía otra
+    // mientras haya una viva en el par (su resultado aún puede cambiar la posición).
+    if (duplicateOf) {
+      return reject(RiskCode.DUPLICATE_SIGNAL, `esta señal ya generó la orden ${duplicateOf.clientOrderId} (${duplicateOf.status}): no se reenvía`);
+    }
+    if (activeOrders > 0) {
+      return reject(RiskCode.ORDER_IN_FLIGHT, `hay ${activeOrders} orden(es) sin terminar en ${symbol}: se espera su resultado`);
     }
     const daily = this.dailyPnl({ [symbol]: price, ...markPrices });
     if (this.isDailyLossReached(daily)) {
@@ -256,7 +327,11 @@ export class RiskManager {
         violations,
       });
     }
-    return approve();
+    return Object.freeze({
+      ok: true,
+      code: RiskCode.OK,
+      approval: order.clientOrderId ? issueApproval(order, this.scope, this.now()) : null,
+    });
   }
 
   // --- Registro de operaciones ejecutadas ---------------------------------------------
@@ -285,26 +360,49 @@ export class RiskManager {
   }
 
   /**
-   * Registra una venta ejecutada: cierra la posición más antigua del símbolo.
-   * Si por el paso del par quedó un residuo sin vender ("dust"), su costo se
-   * cuenta igual como pérdida: es conservador.
+   * Registra una venta ejecutada sobre la posición más antigua del símbolo.
+   *
+   * - Venta total: cierra la posición. Si por el paso del par quedó un residuo
+   *   que no se puede vender ("dust", menor que dustQty), su costo se cuenta
+   *   como pérdida: es conservador.
+   * - Venta PARCIAL (p. ej. una orden ejecutada solo en parte): la parte vendida
+   *   se registra como operación cerrada, con su parte proporcional del costo, y
+   *   la posición sigue abierta con la cantidad que realmente queda.
+   *
+   * @param {{ symbol, qty, price, feeQuote?, time?, orderId?, dustQty? }} fill
    */
-  recordExit({ symbol, qty, price, feeQuote = 0, time = this.now(), orderId = null }) {
+  recordExit({ symbol, qty, price, feeQuote = 0, time = this.now(), orderId = null, dustQty = 0 }) {
     assertFill({ qty, price, feeQuote });
     const position = this.store.oldestOpenPosition(symbol);
     if (!position) throw new RiskError(`no hay posición abierta en ${symbol} para registrar la venta`);
+    if (qty > position.qty * (1 + 1e-9)) {
+      throw new RiskError(`se vendió ${qty} y la posición #${position.id} solo tenía ${position.qty}`);
+    }
 
     const proceeds = exitProceeds({ qty, price, feeQuote });
-    const closed = this.store.closePosition(position.id, {
-      exitQty: qty,
-      exitPrice: price,
-      exitFee: feeQuote,
-      exitProceeds: proceeds,
-      exitTime: time,
-      exitDay: utcDay(time),
-      exitOrderId: orderId,
-      realizedPnl: proceeds - position.entryCost,
-    });
+    const exit = {
+      exitQty: qty, exitPrice: price, exitFee: feeQuote, exitProceeds: proceeds,
+      exitTime: time, exitDay: utcDay(time), exitOrderId: orderId,
+    };
+    const remaining = position.qty - qty;
+    let closed;
+    if (remaining <= Math.max(dustQty, position.qty * 1e-9)) {
+      closed = this.store.closePosition(position.id, { ...exit, realizedPnl: proceeds - position.entryCost });
+    } else {
+      const share = qty / position.qty;
+      const soldCost = position.entryCost * share;
+      closed = this.store.splitPosition(position.id, {
+        ...exit,
+        soldQty: qty,
+        soldCost,
+        soldEntryFee: position.entryFee * share,
+        realizedPnl: proceeds - soldCost,
+      });
+      this.logger.info(
+        { positionId: position.id, sold: qty, remaining },
+        `Venta parcial: la posición #${position.id} sigue abierta con ${remaining}`,
+      );
+    }
     this.logger.info(
       { positionId: closed.id, symbol, qty, price, fee: feeQuote, pnl: closed.realizedPnl },
       `Posición cerrada: ${closed.realizedPnl >= 0 ? 'ganancia' : 'pérdida'} de ${usdt(Math.abs(closed.realizedPnl))} (comisiones incluidas)`,
@@ -419,7 +517,7 @@ function assertFill({ qty, price, feeQuote }) {
 }
 
 /** Arma el RiskManager a partir de la config y una base de datos abierta. */
-export function createRiskManager(config, db, logger, { now, dataHealth } = {}) {
+export function createRiskManager(config, db, logger, { now, dataHealth, reconciliation } = {}) {
   return new RiskManager({
     store: new RiskStore(db, { env: config.env, mode: config.mode }),
     killSwitch: new KillSwitch(config.risk.killSwitchFile),
@@ -433,5 +531,6 @@ export function createRiskManager(config, db, logger, { now, dataHealth } = {}) 
     logger,
     now,
     dataHealth,
+    reconciliation,
   });
 }

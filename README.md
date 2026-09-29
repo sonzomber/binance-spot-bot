@@ -17,6 +17,7 @@ o [Demo Mode](https://demo.binance.com) — y se niega a arrancar con cualquier 
 | `npm run resume` | Reanuda después de una parada (acción manual obligatoria) |
 | `npm run status` | Muestra el estado de riesgo: parada, PnL del día, posiciones |
 | `npm run feed` | Monitor de datos de mercado (solo lectura): velas cerradas, precio, estado |
+| `npm run reconcile` | Compara órdenes y saldos con Binance y ayuda a resolver diferencias |
 | `npm test` | Ejecuta las pruebas |
 
 ## Gestión de riesgo
@@ -29,6 +30,8 @@ no se cumple, la orden se rechaza con un código y un motivo en el log.
 | Regla | Configuración | Aplica a |
 |---|---|---|
 | Bot detenido o kill switch activo | — | compras y ventas |
+| Reconciliación con el exchange pendiente o con diferencias | — | compras y ventas |
+| Señal que ya generó una orden, u otra orden del par sin terminar | — | compras y ventas |
 | Datos de mercado desactualizados | `DATA_STALE_AFTER_SECONDS` (60) | compras y ventas |
 | Pérdida máxima diaria | `MAX_DAILY_LOSS_USDT` (20) | compras y ventas |
 | Monto máximo por operación | `MAX_TRADE_USDT` (50) | compras |
@@ -215,3 +218,77 @@ Si pasan más de `DATA_STALE_AFTER_SECONDS` sin señales de la fuente (mensajes,
 pings o respuestas REST), o sin la última vela cerrada, los datos se marcan
 **desactualizados** y el gestor de riesgo **bloquea toda orden nueva** hasta que
 se recuperen. También están bloqueadas mientras se rellenan huecos.
+
+## Ejecución de órdenes
+
+Todo el código está en [src/execution/](src/execution/). El **ejecutor** es la
+única forma de operar, y cada orden sigue siempre el mismo flujo, en dry-run y
+en testnet/demo:
+
+1. Calcula la cantidad (tope por operación, o la posición a cerrar).
+2. Genera un `clientOrderId` propio y consulta al **gestor de riesgo**. Si rechaza,
+   la orden se registra como rechazada, con su motivo, y no sale.
+3. Guarda la orden en SQLite como `pending` **antes** de enviarla.
+4. La envía con la aprobación del riesgo.
+5. Registra las ejecuciones y actualiza la posición con lo **realmente ejecutado**.
+
+### Nadie se salta el riesgo
+
+- La aprobación del riesgo es un objeto que solo `checkOrder()` puede crear, válido
+  para **una** orden exacta (mismo `clientOrderId`, lado, cantidad…), **una** vez y
+  durante 30 s. El envío simulado y el real la exigen.
+- El cliente ccxt tiene un **filtro de red**: toda petición que crea órdenes
+  (`/api/v3/order`, OCO, SOR…) debe llevar un `clientOrderId` autorizado con esa
+  aprobación. Ni `exchange.createOrder()` llamado directamente puede enviar una orden.
+- La WebSocket API de Binance (otro canal para crear órdenes) está bloqueada.
+
+### Idempotencia: nunca reenviar a ciegas
+
+Si al enviar hay un timeout o error de red, no se sabe si la orden llegó. El bot
+**no la reenvía**: espera a que venza la ventana de Binance (`recvWindow`, 5 s;
+pasado ese tiempo la orden ya no puede entrar) y la **consulta por `clientOrderId`**:
+
+| Resultado de la consulta | Qué hace el bot |
+|---|---|
+| La orden existe | registra su estado y ejecuciones reales |
+| No existe | la marca como no creada (`NOT_CREATED`) |
+| No se puede consultar | queda `pending` y bloquea nuevas órdenes del par hasta resolverla |
+
+Además, una señal de la estrategia produce como máximo **una** orden (clave única
+por señal), y el filtro de red rechaza enviar dos veces el mismo `clientOrderId`.
+
+### Reconciliación al iniciar
+
+Antes de operar, el bot compara su registro con Binance:
+
+- **Órdenes sin terminar** en el registro: consulta su estado real y lo registra.
+- **Órdenes abiertas en Binance** que el bot no registró → diferencia.
+- **Saldos**: esperado = foto de referencia + ejecuciones registradas desde
+  entonces (con comisiones). Si Binance dice otra cosa → diferencia. La primera
+  vez se toma la foto de referencia.
+
+Si hay diferencias, se registran (log y bitácora) y **no se opera** hasta
+resolverlas:
+
+```bash
+npm run reconcile                         # muestra las diferencias
+npm run reconcile -- --cancel-unknown     # cancela órdenes abiertas que el bot no registró
+npm run reconcile -- --accept-balances    # acepta los saldos actuales (tras revisarlos)
+```
+
+`--accept-balances` es útil, por ejemplo, cuando el testnet reinicia los saldos.
+
+### Dry-run
+
+Está activado por defecto y usa **el mismo flujo** (riesgo, registro, comisión y
+slippage simulados). Las órdenes se registran con modo `dry-run` y su
+`clientOrderId` empieza con `sbtp-`. Para enviar órdenes al testnet/demo hay que
+escribir exactamente `DRY_RUN=false` en el `.env`. Al arrancar se muestra una
+advertencia destacada y hay 5 s para cancelar con Ctrl+C.
+
+### Ejecuciones parciales
+
+Una orden de mercado puede ejecutarse solo en parte (queda `expired`). La posición
+registra la cantidad ejecutada, descontando la comisión si se cobró en la moneda
+base. En una venta parcial, la parte vendida queda como operación cerrada y la
+posición sigue abierta con lo que queda.

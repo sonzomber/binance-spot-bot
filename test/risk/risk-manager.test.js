@@ -403,3 +403,61 @@ describe('reanudación manual', () => {
     expect(risk.resume()).toMatchObject({ resumed: false });
   });
 });
+
+// ---------------------------------------------------------------------------------
+describe('ventas parciales (la posición refleja lo realmente vendido)', () => {
+  it('vender una parte deja la posición abierta con el resto y registra la parte vendida', async () => {
+    const { risk } = await setup();
+    risk.recordEntry({ symbol: SYMBOL, qty: 1, price: 100, feeQuote: 1 }); // costo 101
+    const closed = risk.recordExit({ symbol: SYMBOL, qty: 0.4, price: 110, feeQuote: 0.44 });
+    expect(closed).toMatchObject({ status: 'closed', qty: 0.4 });
+    expect(closed.entryCost).toBeCloseTo(40.4, 9); // 40% del costo
+    expect(closed.realizedPnl).toBeCloseTo(0.4 * 110 - 0.44 - 40.4, 9);
+    const [open] = risk.store.openPositions();
+    expect(open.qty).toBeCloseTo(0.6, 12);
+    expect(open.entryCost).toBeCloseTo(60.6, 9);
+    expect(open.entryFee).toBeCloseTo(0.6, 9);
+  });
+
+  it('un resto menor que lo vendible (dust) cierra la posición completa', async () => {
+    const { risk } = await setup();
+    risk.recordEntry({ symbol: SYMBOL, qty: 0.00058941, price: 84_000 });
+    risk.recordExit({ symbol: SYMBOL, qty: 0.00058, price: 84_000, dustQty: 0.00001 });
+    expect(risk.store.openPositions()).toHaveLength(0);
+  });
+
+  it('vender más de lo que tiene la posición es un error de registro', async () => {
+    const { risk } = await setup();
+    risk.recordEntry({ symbol: SYMBOL, qty: 0.001, price: 84_000 });
+    expect(() => risk.recordExit({ symbol: SYMBOL, qty: 0.002, price: 84_000 })).toThrow(/solo tenía 0.001/);
+  });
+});
+
+describe('reglas de idempotencia y reconciliación en checkOrder', () => {
+  const withId = (side = 'buy') => ({ ...order(side, 0.00059, 84_000), clientOrderId: 'sbtp-1' });
+
+  it('aprueba con una aprobación de un solo uso solo si la orden trae clientOrderId', async () => {
+    const { risk } = await setup();
+    expect(risk.checkOrder(withId(), { market }).approval).toMatchObject({ clientOrderId: 'sbtp-1', amount: 0.00059 });
+    expect(risk.checkOrder(order('buy', 0.00059, 84_000), { market }).approval).toBeNull();
+  });
+
+  it('señal duplicada → DUPLICATE_SIGNAL', async () => {
+    const { risk } = await setup();
+    const result = risk.checkOrder(withId(), { market, duplicateOf: { clientOrderId: 'sbtp-0', status: 'filled' } });
+    expect(result).toMatchObject({ ok: false, code: RiskCode.DUPLICATE_SIGNAL });
+  });
+
+  it('orden sin terminar en el par → ORDER_IN_FLIGHT', async () => {
+    const { risk } = await setup();
+    expect(risk.checkOrder(withId(), { market, activeOrders: 1 }).code).toBe(RiskCode.ORDER_IN_FLIGHT);
+  });
+
+  it('reconciliación pendiente → RECONCILIATION', async () => {
+    const { risk } = await setup();
+    risk.reconciliation = { status: () => ({ ok: false, reason: '2 diferencia(s) sin resolver' }) };
+    const result = risk.checkOrder(withId(), { market });
+    expect(result).toMatchObject({ ok: false, code: RiskCode.RECONCILIATION });
+    expect(result.reason).toMatch(/2 diferencia/);
+  });
+});
