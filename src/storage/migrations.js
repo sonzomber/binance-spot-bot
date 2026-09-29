@@ -250,4 +250,48 @@ export const MIGRATIONS = Object.freeze([
   CREATE INDEX idx_balance_snapshots_scope ON balance_snapshots (env, mode, asset, id);
   `,
   },
+
+  {
+    version: 4,
+    name: 'resultados de backtests y sus operaciones (módulo 8)',
+    sql: `
+  -- Un resultado de backtest por fila. Un backtest con período de ajuste y de
+  -- validación guarda dos filas con el mismo group_id.
+  CREATE TABLE backtest_runs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id      TEXT NOT NULL,                             -- une ajuste y validación de una misma corrida
+    segment       TEXT NOT NULL CHECK (segment IN ('full', 'train', 'validation')),
+    created_at    TEXT NOT NULL,
+    data_env      TEXT NOT NULL CHECK (data_env IN ('testnet', 'demo', 'production-readonly')),
+    strategy      TEXT NOT NULL,
+    params        TEXT NOT NULL,                             -- JSON: parámetros de la estrategia
+    symbol        TEXT NOT NULL,
+    timeframe     TEXT NOT NULL,
+    period_from   TEXT NOT NULL,                             -- ISO UTC, inclusive
+    period_to     TEXT NOT NULL,                             -- ISO UTC, exclusivo
+    capital       REAL NOT NULL,
+    fee_rate      REAL NOT NULL,
+    slippage_bps  REAL NOT NULL,
+    settings      TEXT NOT NULL,                             -- JSON: límites de riesgo, filtros del par, etc.
+    metrics       TEXT NOT NULL,                             -- JSON: el reporte completo
+    csv_path      TEXT
+  );
+  CREATE INDEX idx_backtest_runs_group ON backtest_runs (group_id);
+
+  CREATE TABLE backtest_trades (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      INTEGER NOT NULL REFERENCES backtest_runs (id) ON DELETE CASCADE,
+    n           INTEGER NOT NULL,                            -- número de operación en la corrida
+    entry_time  TEXT NOT NULL,
+    entry_price REAL NOT NULL,
+    exit_time   TEXT NOT NULL,
+    exit_price  REAL NOT NULL,
+    qty         REAL NOT NULL,
+    fees        REAL NOT NULL,                               -- comisión de compra + venta (USDT)
+    pnl         REAL NOT NULL,                               -- neto de comisiones (USDT)
+    pnl_pct     REAL NOT NULL,                               -- sobre el costo de entrada
+    UNIQUE (run_id, n)
+  );
+  `,
+  },
 ]);

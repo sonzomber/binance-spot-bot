@@ -24,7 +24,7 @@ describe('migraciones versionadas', () => {
     expect(info.history.map((m) => m.version)).toEqual(MIGRATIONS.map((m) => m.version));
     expect(info.history.every((m) => m.applied_at)).toBe(true);
     expect(tableNames(db)).toEqual(
-      ['balance_snapshots', 'candles', 'events', 'order_fills', 'orders', 'positions', 'risk_state', 'schema_migrations'],
+      ['backtest_runs', 'backtest_trades', 'balance_snapshots', 'candles', 'events', 'order_fills', 'orders', 'positions', 'risk_state', 'schema_migrations'],
     );
   });
 

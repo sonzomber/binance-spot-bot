@@ -18,6 +18,7 @@ o [Demo Mode](https://demo.binance.com) — y se niega a arrancar con cualquier 
 | `npm run status` | Muestra el estado de riesgo: parada, PnL del día, posiciones |
 | `npm run feed` | Monitor de datos de mercado (solo lectura): velas cerradas, precio, estado |
 | `npm run reconcile` | Compara órdenes y saldos con Binance y ayuda a resolver diferencias |
+| `npm run backtest -- --from AAAA-MM-DD --to AAAA-MM-DD` | Backtest con velas históricas de producción (solo lectura) |
 | `npm test` | Ejecuta las pruebas |
 
 ## Gestión de riesgo
@@ -338,3 +339,79 @@ El kill switch y la pérdida máxima diaria también terminan en este apagado.
 
 Cada `HEARTBEAT_SECONDS` se registra el estado: entorno y modo, estrategia,
 última vela procesada, precio, posiciones abiertas, PnL del día y estado de los datos.
+
+## Backtest
+
+```bash
+npm run backtest -- --from 2025-01-01 --to 2025-07-01
+npm run backtest -- --from 2025-01-01 --to 2025-07-01 --split 2025-05-01
+npm run backtest -- --from 2025-01-01 --to 2025-07-01 --split 2025-05-01 --grid '{"fast":[5,9,12],"slow":[21,30]}'
+```
+
+| Opción | Por defecto | Qué hace |
+|---|---|---|
+| `--from`, `--to` | obligatorias | período en UTC (`to` exclusivo) |
+| `--symbol`, `--timeframe` | `SYMBOL`, `TIMEFRAME` | par e intervalo |
+| `--strategy`, `--params` | `STRATEGY`, `STRATEGY_PARAMS` | estrategia y parámetros (JSON) |
+| `--capital` | `BACKTEST_CAPITAL` (20) | capital inicial en USDT |
+| `--fee`, `--slippage-bps` | `FEE_RATE`, `SLIPPAGE_BPS` | comisión y slippage simulados |
+| `--split FECHA` | — | ajuste en `[from, split)`, validación en `[split, to)` |
+| `--grid JSON` | — | valores a probar en el período de ajuste (requiere `--split`) |
+| `--allow-gaps` | no | correr aunque falten velas |
+| `--no-save` | no | no guardar en SQLite ni exportar CSV |
+
+Los límites de riesgo (`MAX_TRADE_USDT`, `MAX_DAILY_LOSS_USDT`, `MAX_OPEN_POSITIONS`) son los del `.env`.
+
+### Datos: producción, solo lectura
+
+Las velas vienen de `data-api.binance.vision`, el dominio de Binance que solo sirve
+datos públicos de mercado (ahí los endpoints de órdenes no existen). El cliente
+([src/backtest/market-data-client.js](src/backtest/market-data-client.js)) no usa
+API keys, no usa ccxt ni el módulo de ejecución, y no tiene ningún método para
+órdenes. Las velas se guardan en el caché SQLite con entorno `production-readonly`:
+repetir un backtest no vuelve a descargarlas.
+
+**Huecos:** si faltan velas en el período (por ejemplo, la caída de Binance del
+24/03/2023 entre 12:40 y 13:59 UTC), el backtest avisa y **no corre**, salvo con
+`--allow-gaps`.
+
+### Cómo simula ([src/backtest/engine.js](src/backtest/engine.js))
+
+- **Los mismos módulos que en vivo:** la misma clase de estrategia, el mismo
+  `RiskManager` (tope por operación, máximo de posiciones, filtros del par,
+  pérdida diaria, PnL con comisiones), el mismo `OrderExecutor` y la misma
+  simulación de ejecución que el dry-run. Todo sobre una base SQLite en memoria,
+  propia de cada corrida, con un reloj simulado.
+- **Sin sesgo de futuro:** la señal se calcula al **cierre** de una vela y la orden
+  se ejecuta a la **apertura de la vela siguiente**, más slippage. Una señal en la
+  última vela del período no se ejecuta.
+- **Capital:** cada compra usa como máximo `min(MAX_TRADE_USDT, saldo disponible)`,
+  redondeado al paso del par. Si el capital no alcanza el mínimo del par, no corre.
+- **Pérdida diaria:** si se alcanza, el riesgo detiene el "bot" igual que en vivo
+  (no se envían órdenes, ni ventas); aquí la reanudación manual se simula a las
+  00:00 UTC del día siguiente.
+- **Posición abierta al final:** se valora como si se vendiera al último cierre
+  (con slippage y comisión), pero no cuenta como operación cerrada.
+- **Reproducible:** mismas velas y parámetros → mismo resultado, siempre.
+
+### Reporte
+
+Número de operaciones, ganancia/pérdida neta (USDT y %), % de operaciones ganadoras,
+ganancia y pérdida promedio, profit factor (ganancias brutas ÷ pérdidas brutas),
+máximo drawdown (USDT y %), comisiones pagadas, y comparación con **comprar y
+mantener** en el mismo período (con la misma comisión, slippage y filtros).
+
+### Ajuste y validación
+
+Con `--split`, cada período se corre y reporta por separado, con su propio capital.
+Con `--grid`, cada combinación válida de parámetros se prueba **solo en el período
+de ajuste**, se elige la mejor (mayor PnL neto) y **solo esa** se corre en el de
+validación, con datos que no se usaron para elegirla. Un buen resultado en el
+ajuste y malo en la validación es la señal clásica de *sobreajuste*.
+
+### Resultados guardados
+
+Cada resultado se guarda en SQLite (`backtest_runs`: parámetros, período, fecha,
+comisión, slippage, límites, filtros del par y todas las métricas; `backtest_trades`:
+cada operación). Ajuste y validación comparten `group_id`. Las operaciones se
+exportan a CSV en `data/backtests/backtest-<id>-<período>.csv`.

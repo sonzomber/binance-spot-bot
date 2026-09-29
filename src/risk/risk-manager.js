@@ -210,13 +210,14 @@ export class RiskManager {
   }
 
   /**
-   * Cantidad a comprar con el presupuesto MAX_TRADE_USDT, dejando margen para
-   * slippage y comisión, redondeada HACIA ABAJO al paso del par.
+   * Cantidad a comprar con el presupuesto MAX_TRADE_USDT (o menos, si `budget` es
+   * menor: p. ej. el saldo disponible), dejando margen para slippage y comisión,
+   * redondeada HACIA ABAJO al paso del par.
    */
-  sizeBuy({ market, price }) {
+  sizeBuy({ market, price, budget = this.limits.maxTradeUsdt }) {
     const step = market.precision?.amount;
     const unitCost = this.estimateBuyCost(1, price);
-    let amount = roundDownToStep(this.limits.maxTradeUsdt / unitCost, step);
+    let amount = roundDownToStep(Math.min(budget, this.limits.maxTradeUsdt) / unitCost, step);
     const cap = Math.min(market.limits?.amount?.max || Infinity, market.limits?.market?.max || Infinity);
     if (amount > cap) amount = roundDownToStep(cap, step);
     return { amount, price, estimatedCost: this.estimateBuyCost(amount, price) };

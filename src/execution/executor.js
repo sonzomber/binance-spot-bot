@@ -34,13 +34,18 @@ export class OrderExecutor {
    * @param {number} [deps.resolveDelayMs] espera antes de consultar tras un timeout
    *        (recvWindow de Binance, 5 s, + margen: pasado ese tiempo la orden ya no puede entrar)
    * @param {(ms: number) => Promise<void>} [deps.sleep]
+   * @param {() => number} [deps.getFreeQuote] saldo libre en USDT: limita el tamaño de la compra y
+   *        el riesgo lo verifica (el backtest lo usa para respetar el capital)
+   * @param {(scope: object, now: number) => string} [deps.idGenerator] clientOrderIds (el backtest
+   *        usa uno determinista para que los resultados sean reproducibles)
    */
-  constructor({ risk, orders, venue, market, getPrice, logger, now = Date.now, resolveDelayMs = 6000, sleep = defaultSleep }) {
+  constructor({ risk, orders, venue, market, getPrice, logger, now = Date.now, resolveDelayMs = 6000, sleep = defaultSleep,
+    getFreeQuote, idGenerator = newClientOrderId }) {
     const { env, mode } = orders.scope;
     if (risk.scope.env !== env || risk.scope.mode !== mode) {
       throw new Error(`riesgo (${risk.scope.env}/${risk.scope.mode}) y órdenes (${env}/${mode}) deben ser del mismo ámbito`);
     }
-    Object.assign(this, { risk, orders, venue, market, getPrice, logger, now, resolveDelayMs, sleep });
+    Object.assign(this, { risk, orders, venue, market, getPrice, logger, now, resolveDelayMs, sleep, getFreeQuote, idGenerator });
     this.queue = Promise.resolve();
   }
 
@@ -67,7 +72,10 @@ export class OrderExecutor {
     const symbol = market.symbol;
     const price = await this.getPrice();
 
-    const sizing = side === 'buy' ? this.risk.sizeBuy({ market, price }) : this.risk.sizeSell({ market });
+    const freeQuote = this.getFreeQuote?.();
+    const sizing = side === 'buy'
+      ? this.risk.sizeBuy({ market, price, ...(freeQuote === undefined ? {} : { budget: freeQuote }) })
+      : this.risk.sizeSell({ market });
     if (!sizing || !(sizing.amount > 0)) {
       const reason = side === 'sell' ? `no hay posición abierta en ${symbol} para vender` : 'la cantidad a comprar resulta 0';
       this.logger?.info({ side, signalKey }, `Señal ignorada: ${reason}`);
@@ -75,7 +83,7 @@ export class OrderExecutor {
     }
 
     const order = {
-      clientOrderId: newClientOrderId(this.scope, this.now()),
+      clientOrderId: this.idGenerator(this.scope, this.now()),
       symbol, side, type: 'market', amount: sizing.amount, price,
     };
     const meta = { strategy, signalCode, signalKey };
@@ -84,6 +92,7 @@ export class OrderExecutor {
     const decision = this.risk.checkOrder(order, {
       market,
       markPrices: { [symbol]: price },
+      freeQuote,
       activeOrders: this.orders.activeOrders(symbol).length,
       duplicateOf: signalKey ? this.orders.getBySignalKey(signalKey) : null,
     });

@@ -87,6 +87,9 @@ export class RiskStore {
                 @exitDay, @exitOrderId, @realizedPnl
            FROM positions WHERE ${where} AND id = @id`,
       ),
+      closedPositions: db.prepare(
+        `SELECT * FROM positions WHERE ${where} AND status = 'closed' ORDER BY exit_time, id`,
+      ),
       appliedOrder: db.prepare(
         `SELECT 1 FROM positions WHERE ${where} AND (entry_order_id = @orderId OR exit_order_id = @orderId) LIMIT 1`,
       ),
@@ -193,6 +196,11 @@ export class RiskStore {
       if (changes !== 1) throw new Error(`La posición ${id} no existe en este ámbito, no está abierta o no tiene ${soldQty}`);
       return toPosition(this.sql.getPosition.get({ ...this.scope, id: lastInsertRowid }));
     })();
+  }
+
+  /** Operaciones cerradas del ámbito, en orden de cierre. */
+  closedPositions() {
+    return this.sql.closedPositions.all(this.scope).map(toPosition);
   }
 
   /** ¿Esta orden ya se aplicó a alguna posición (como entrada o salida)? */

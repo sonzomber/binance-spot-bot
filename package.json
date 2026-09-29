@@ -16,6 +16,7 @@
     "status": "node scripts/status.js",
     "feed": "node scripts/feed.js",
     "reconcile": "node scripts/reconcile.js",
+    "backtest": "node scripts/backtest.js",
     "test": "vitest run",
     "test:watch": "vitest"
   },
