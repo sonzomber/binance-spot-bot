@@ -58,4 +58,21 @@ describe('createLogger', () => {
     logger.warn('sí');
     expect(out.text().trim().split('\n')).toHaveLength(1);
   });
+
+  it('con scope, cada línea del archivo lleva "scope" (entorno/modo); en la consola no se muestra', () => {
+    const file = path.join(tmp.dir, 'bot.log');
+    const out = fakeStdout();
+    const logger = createLogger({ pretty: true, stdout: out.stream, file, scope: { env: 'demo', mode: 'exchange' } });
+    logger.info({ env: 'demo', mode: 'exchange' }, 'Estado del bot');
+    const line = JSON.parse(fs.readFileSync(file, 'utf8').trim());
+    expect(line).toMatchObject({ scope: 'demo/exchange', env: 'demo', mode: 'exchange', msg: 'Estado del bot' });
+    expect(out.text()).toMatch(/Estado del bot/);
+    expect(out.text()).not.toMatch(/scope|demo\/exchange/);
+  });
+
+  it('sin scope (scripts generales), las líneas no lo llevan', () => {
+    const file = path.join(tmp.dir, 'bot.log');
+    createLogger({ console: false, file }).info('general');
+    expect(JSON.parse(fs.readFileSync(file, 'utf8').trim())).not.toHaveProperty('scope');
+  });
 });

@@ -15,8 +15,8 @@ loadEnvFile();
 let db;
 try {
   const config = loadConfig();
-  const logger = createLogger({ ...config.log, console: false }); // auditoría en el archivo de log
-  db = openDatabase(config.storage.dbPath);
+  const logger = createLogger({ ...config.log, console: false, scope: { env: config.env, mode: config.mode } }); // auditoría en el archivo de log
+  db = openDatabase(config.storage.dbPath, { logger });
   const result = createRiskManager(config, db, logger).resume({ by: 'npm run resume' });
 
   if (result.resumed) {

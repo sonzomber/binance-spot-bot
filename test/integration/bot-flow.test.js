@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { StartupError, startBot } from '../../src/app.js';
 import { loadConfig } from '../../src/config/index.js';
 import { KillSwitch } from '../../src/risk/kill-switch.js';
+import { BotStatusStore } from '../../src/storage/bot-status-store.js';
 import { openDatabase } from '../../src/storage/db.js';
 import { OrderStore } from '../../src/storage/order-store.js';
 import { RiskStore } from '../../src/storage/risk-store.js';
@@ -183,5 +184,42 @@ describe('si un paso del arranque falla, el bot no arranca y explica el motivo',
     expect(error.step).toBe(4);
     expect(error.message).toMatch(/diferencia\(s\) con el exchange: orden abierta en Binance que el bot no registró.*npm run reconcile/);
     expect(messages().join('\n')).toMatch(/DRY-RUN DESACTIVADO/); // advertencia al arrancar sin dry-run
+  });
+});
+
+describe('estado del bot para el panel (bot_status)', () => {
+  function readStatus() {
+    const db = openDatabase(config.storage.dbPath);
+    try {
+      return new BotStatusStore(db, SCOPE).get();
+    } finally {
+      db.close();
+    }
+  }
+
+  it('arranque real → "running" con estrategia, parámetros y config pública; apagado → "stopped"', async () => {
+    bot = await start();
+    expect(readStatus()).toMatchObject({
+      env: 'testnet', mode: 'dry-run', state: 'running', pid: process.pid, heartbeatMs: 5000,
+      strategy: 'sma-cross', params: { fast: 2, slow: 4 }, symbol: 'BTC/USDT', timeframe: '1m',
+      heartbeatAt: expect.any(String), dataStale: expect.any(Boolean),
+      settings: { dryRun: true, maxDailyLossUsdt: 20, maxOpenPositions: 1, maxTradeUsdt: 50 },
+    });
+
+    sockets.current().open();
+    const next = bot.feed.lastClosed.time + MIN;
+    sockets.current().kline(next, 84_000);
+    await vi.waitFor(() => expect(readStatus().lastCandle).toBe(new Date(next).toISOString()), { timeout: 5000 });
+
+    await bot.shutdown('prueba del panel');
+    expect(readStatus()).toMatchObject({ state: 'stopped', stopReason: 'prueba del panel', exitCode: 0 });
+  });
+
+  it('si el arranque falla, queda registrado por qué (sin dejar la base bloqueada)', async () => {
+    new KillSwitch(config.risk.killSwitchFile).activate('mantenimiento');
+    await start().catch(() => {});
+    expect(readStatus()).toMatchObject({
+      state: 'stopped', exitCode: 1, stopReason: expect.stringMatching(/^no arrancó: paso 3\/5 .*kill switch activo/),
+    });
   });
 });

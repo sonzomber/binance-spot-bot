@@ -29,8 +29,8 @@ let db;
 let exchange;
 try {
   const config = loadConfig();
-  const logger = createLogger({ ...config.log, console: false }); // auditoría en el archivo de log
-  db = openDatabase(config.storage.dbPath);
+  const logger = createLogger({ ...config.log, console: false, scope: { env: config.env, mode: config.mode } }); // auditoría en el archivo de log
+  db = openDatabase(config.storage.dbPath, { logger });
   exchange = createTradingExchange(config, { limiter: new WeightLimiter({ logger }) });
   const { market } = await runPreflight(exchange, config, pino({ level: 'silent' }));
   const risk = createRiskManager(config, db, logger);

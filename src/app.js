@@ -12,6 +12,9 @@
  *
  * Si un paso falla, se cierra lo que ya se abrió y se lanza StartupError con
  * el paso y el motivo. Si todos pasan, arranca el feed en vivo y el ciclo del bot.
+ *
+ * Desde el paso 3 (cuando ya hay base de datos) se guarda el estado del bot para
+ * el panel: "starting", y si el arranque falla, "stopped" con el motivo.
  */
 import { runPreflight } from './config/preflight.js';
 import { TradingBot } from './bot.js';
@@ -22,6 +25,7 @@ import { TimeSync } from './data/time-sync.js';
 import { createExecution } from './execution/index.js';
 import { createTradingExchange } from './lib/exchange.js';
 import { RiskError, createRiskManager } from './risk/risk-manager.js';
+import { BotStatusStore, publicSettings } from './storage/bot-status-store.js';
 import { openDatabase } from './storage/db.js';
 import { createStrategy } from './strategy/registry.js';
 
@@ -46,6 +50,7 @@ export class StartupError extends Error {
 export async function startBot({ config, logger, overrides = {} }) {
   const { fetchImplementation, createSocket, warnDelayMs = 1000 } = overrides;
   const opened = []; // recursos abiertos, para cerrarlos si el arranque falla
+  let status; // estado del bot para el panel (desde el paso 3)
 
   const step = async (n, name, fn) => {
     logger.info(`[${n}/${STEPS}] ${name}…`);
@@ -86,8 +91,16 @@ export async function startBot({ config, logger, overrides = {} }) {
 
     // 3. Estado de riesgo --------------------------------------------------------------
     const { db, risk, health, price } = await step(3, 'Cargar el estado de riesgo desde SQLite', async () => {
-      const db = openDatabase(config.storage.dbPath);
+      const db = openDatabase(config.storage.dbPath, { logger });
       opened.push({ name: 'base de datos', close: () => db.close() });
+      status = saveStatus(logger, 'arranque', () => {
+        const store = new BotStatusStore(db, config);
+        store.start({
+          time: now(), pid: process.pid, heartbeatMs: config.lifecycle.heartbeatMs, strategy: strategy.id,
+          params: strategy.params, symbol: config.symbol, timeframe: config.timeframe, settings: publicSettings(config),
+        });
+        return store;
+      });
       const health = new DataHealth({ timeframe: config.timeframe, staleAfterMs: config.dataStaleAfterMs, now, logger });
       const risk = createRiskManager(config, db, logger, { now, dataHealth: health });
       risk.assertCanStart(); // parada guardada o kill switch activo → no arranca
@@ -138,13 +151,15 @@ export async function startBot({ config, logger, overrides = {} }) {
     opened.push({ name: 'monitor de datos', close: () => health.stop() });
     feed.startStreaming();
     bot = new TradingBot({
-      config, strategy, feed, executor, risk, health, killSwitch: risk.killSwitch, logger, now,
+      config, strategy, feed, executor, risk, health, killSwitch: risk.killSwitch, logger, now, status,
       // Se cierran en este orden: primero lo que produce eventos, al final la base de datos.
       resources: [...opened].reverse(),
     });
     bot.start();
     return bot;
   } catch (err) {
+    // Para el panel: por qué no arrancó (antes de cerrar la base de datos).
+    if (status) saveStatus(logger, 'arranque fallido', () => status.stopped({ time: Date.now(), reason: `no arrancó: ${err.message}`, exitCode: 1 }));
     for (const resource of opened.reverse()) {
       try {
         await resource.close();
@@ -153,6 +168,20 @@ export async function startBot({ config, logger, overrides = {} }) {
       }
     }
     throw err;
+  }
+}
+
+/**
+ * Guarda el estado del bot para el panel. Nunca lanza: si falla, lo advierte y
+ * el arranque sigue igual (es solo un registro).
+ * @returns {*} lo que devuelve write, o undefined si falló
+ */
+function saveStatus(logger, what, write) {
+  try {
+    return write();
+  } catch (err) {
+    logger.warn({ err: err.message }, `No se pudo guardar el estado del bot para el panel (${what}); el bot sigue normalmente`);
+    return undefined;
   }
 }
 

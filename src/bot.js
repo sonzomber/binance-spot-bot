@@ -13,6 +13,10 @@
  *   5. cierra WebSocket, timers, cliente y base de datos.
  * Las posiciones abiertas NO se cierran ni se venden: vender sería una decisión
  * de trading, y apagar el bot no debe tomar decisiones de trading.
+ *
+ * Estado para el panel: si recibe un BotStatusStore, guarda ahí el arranque, cada
+ * heartbeat, cada vela procesada y el apagado. Es solo un registro: si guardarlo
+ * falla, se advierte en el log y el bot sigue igual (no afecta ninguna decisión).
  */
 import { timeframeToMs } from './lib/timeframes.js';
 
@@ -32,9 +36,10 @@ export class TradingBot {
    * @param {() => number} [deps.now] hora del servidor
    * @param {Array<{ name: string, close: () => unknown }>} [deps.resources] a cerrar al apagar
    *        (en orden: feed, timers, cliente, base de datos…)
+   * @param {import('./storage/bot-status-store.js').BotStatusStore} [deps.status] estado para el panel
    */
-  constructor({ config, strategy, feed, executor, risk, health, killSwitch, logger, now = Date.now, resources = [] }) {
-    Object.assign(this, { config, strategy, feed, executor, risk, health, killSwitch, logger, now, resources });
+  constructor({ config, strategy, feed, executor, risk, health, killSwitch, logger, now = Date.now, resources = [], status }) {
+    Object.assign(this, { config, strategy, feed, executor, risk, health, killSwitch, logger, now, resources, status });
     this.symbol = config.symbol;
     this.stepMs = timeframeToMs(config.timeframe);
     this.shutdownTimeoutMs = config.lifecycle.shutdownTimeoutMs;
@@ -71,6 +76,7 @@ export class TradingBot {
       { strategy: this.strategy.id, symbol: this.symbol, timeframe: this.config.timeframe, mode: this.config.mode },
       'Bot en marcha: esperando velas cerradas',
     );
+    this.#saveStatus('en marcha', (status) => status.running({ time: this.now() }));
     this.heartbeat();
   }
 
@@ -99,6 +105,7 @@ export class TradingBot {
       while (this.queue.length > 0 && !this.stopping) {
         const event = this.queue.shift();
         await this.#processSafely(event);
+        this.#saveStatus('vela procesada', (status) => status.candleProcessed({ time: this.now(), lastCandle: this.lastCandle?.time }));
       }
     } finally {
       this.current = null;
@@ -203,6 +210,31 @@ export class TradingBot {
       },
       `Estado: ${this.config.env}/${this.config.mode} · ${this.strategy.id} · ${positions.length} posición(es) · PnL del día ${round(daily.total)} USDT`,
     );
+    this.#saveStatus('heartbeat', (status) => status.heartbeat({
+      time: this.now(), lastCandle: this.lastCandle?.time, price, priceTime: this.#priceTime(), data,
+    }));
+  }
+
+  /** Hora del precio que devuelve getPrice(): el último evento "price" o el cierre de la última vela. */
+  #priceTime() {
+    const candle = this.lastCandle ?? this.feed.getCandles(1)[0];
+    const closeTime = candle ? candle.time + this.stepMs : null;
+    if (this.lastPriceTime === null) return closeTime;
+    return closeTime === null ? this.lastPriceTime : Math.max(this.lastPriceTime, closeTime);
+  }
+
+  /**
+   * Guarda el estado para el panel. Nunca lanza: un fallo aquí no debe afectar al bot.
+   * @param {string} what qué se guardaba (para el aviso)
+   * @param {(status: import('./storage/bot-status-store.js').BotStatusStore) => void} write
+   */
+  #saveStatus(what, write) {
+    if (!this.status) return;
+    try {
+      write(this.status);
+    } catch (err) {
+      this.logger.warn({ err: err.message }, `No se pudo guardar el estado del bot para el panel (${what}); el bot sigue normalmente`);
+    }
   }
 
   // --- Apagado ordenado ---------------------------------------------------------------
@@ -219,6 +251,7 @@ export class TradingBot {
   async #shutdown(reason, exitCode) {
     const level = exitCode === 0 ? 'info' : 'warn';
     this.logger[level]({ reason }, `Apagando el bot: ${reason}`);
+    this.#saveStatus('apagando', (status) => status.stopping({ time: this.now(), reason }));
 
     // 1. No se aceptan señales nuevas (enqueue las rechaza y lo registra mientras dura el apagado)
     this.stopKillSwitchWatch?.();
@@ -268,6 +301,7 @@ export class TradingBot {
     } catch (err) {
       this.logger.error({ err }, 'No se pudo registrar el apagado en la base de datos');
     }
+    this.#saveStatus('detenido', (status) => status.stopped({ time: this.now(), reason, exitCode }));
 
     // 5. Cerrar recursos (WebSocket, timers, cliente, base de datos)
     this.#removeListeners();

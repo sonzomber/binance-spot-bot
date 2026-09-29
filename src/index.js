@@ -28,7 +28,7 @@ async function main() {
     return;
   }
 
-  const logger = createLogger(config.log);
+  const logger = createLogger({ ...config.log, scope: { env: config.env, mode: config.mode } });
   if (!envFileFound) logger.warn('No se encontró .env: se usan variables de entorno y valores por defecto.');
   logger.info({ config: describeConfig(config) }, 'Configuración cargada');
   logger.info(

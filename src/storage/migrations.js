@@ -294,4 +294,49 @@ export const MIGRATIONS = Object.freeze([
   );
   `,
   },
+
+  {
+    version: 5,
+    name: 'estado del bot y curva de capital de los backtests (panel)',
+    // Solo AGREGA tablas: no modifica ni borra datos existentes (una prueba lo verifica).
+    sql: `
+  -- 1. Estado del bot por ámbito, para el panel de monitoreo (que lo lee en solo
+  --    lectura). El bot lo actualiza al arrancar, en cada heartbeat, tras cada vela
+  --    y al apagarse. Nunca contiene secretos: settings es una lista blanca.
+  CREATE TABLE bot_status (
+    env          TEXT NOT NULL CHECK (env IN ('testnet', 'demo')),
+    mode         TEXT NOT NULL CHECK (mode IN ('dry-run', 'exchange')),
+    state        TEXT NOT NULL CHECK (state IN ('starting', 'running', 'stopping', 'stopped')),
+    pid          INTEGER,
+    started_at   TEXT,
+    updated_at   TEXT NOT NULL,                             -- última escritura
+    heartbeat_at TEXT,                                      -- último heartbeat
+    heartbeat_ms INTEGER,                                   -- intervalo configurado (para detectar silencio)
+    stopped_at   TEXT,
+    stop_reason  TEXT,
+    exit_code    INTEGER,
+    strategy     TEXT,
+    params       TEXT,                                      -- JSON: parámetros de la estrategia
+    symbol       TEXT,
+    timeframe    TEXT,
+    last_candle  TEXT,                                      -- inicio de la última vela procesada
+    price        REAL,                                      -- último precio conocido
+    price_time   TEXT,
+    data_stale   INTEGER CHECK (data_stale IN (0, 1)),
+    data_reason  TEXT,
+    settings     TEXT,                                      -- JSON: límites, dry-run, comisión… (sin secretos)
+    PRIMARY KEY (env, mode)
+  );
+
+  -- 2. Curva de capital de cada backtest: n = 0 es el capital inicial (time = inicio
+  --    del período); n ≥ 1 es el valor al CIERRE de la vela que empieza en time.
+  CREATE TABLE backtest_equity (
+    run_id INTEGER NOT NULL REFERENCES backtest_runs (id) ON DELETE CASCADE,
+    n      INTEGER NOT NULL,
+    time   INTEGER NOT NULL,                                -- ms UTC
+    equity REAL NOT NULL,                                   -- USDT
+    PRIMARY KEY (run_id, n)
+  ) WITHOUT ROWID;
+  `,
+  },
 ]);

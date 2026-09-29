@@ -159,3 +159,25 @@ describe('reproducible de punta a punta', () => {
     expect(strip(b)).toEqual(strip(a));
   });
 });
+
+describe('curva de capital (para el panel)', () => {
+  it('se guarda completa: capital inicial + un punto por vela, igual a la del reporte', async () => {
+    const result = await run();
+    const [segment] = result.segments;
+    const store = new BacktestStore(db);
+    const equity = store.getEquity(segment.runId);
+    expect(equity).toHaveLength(60 * 24 + 1); // 60 días de velas de 1 h + el capital inicial
+    expect(equity[0]).toEqual({ n: 0, time: T0 + 50 * H, equity: 20 });
+    expect(equity.map((p) => [p.time, p.equity])).toEqual(segment.report.equity.map((p) => [p.time, p.value]));
+    // Las métricas guardadas siguen sin la curva (va en su propia tabla)
+    expect(store.getRun(segment.runId).metrics).not.toHaveProperty('equity');
+  });
+
+  it('en ajuste + validación, cada período tiene su propia curva', async () => {
+    const result = await run({ split: T0 + 50 * H + 40 * 24 * H });
+    const store = new BacktestStore(db);
+    const [train, validation] = result.segments;
+    expect(store.getEquity(train.runId)).toHaveLength(40 * 24 + 1);
+    expect(store.getEquity(validation.runId)).toHaveLength(20 * 24 + 1);
+  });
+});

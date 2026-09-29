@@ -11,22 +11,52 @@ import Database from 'better-sqlite3';
 import { MIGRATIONS } from './migrations.js';
 
 /**
- * Abre (o crea) la base de datos y aplica las migraciones pendientes.
+ * Abre (o crea) la base de datos y aplica las migraciones pendientes. Si la base
+ * ya tiene datos y hay migraciones pendientes, ANTES de aplicarlas guarda una
+ * copia de seguridad en `<carpeta de la base>/backups/` (ver backupBeforeMigrating).
  * @param {string} file ruta del archivo, o ':memory:' para tests
+ * @param {{ logger?: import('pino').Logger }} [options]
  */
-export function openDatabase(file) {
+export function openDatabase(file, { logger } = {}) {
   if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new Database(file);
   db.pragma('journal_mode = WAL'); // el bot y los scripts (kill/resume/status) pueden usarla a la vez
   db.pragma('busy_timeout = 5000'); // si otro proceso está escribiendo, espera en vez de fallar
   db.pragma('foreign_keys = ON');
   try {
+    const backup = file === ':memory:' ? null : backupBeforeMigrating(db, file);
+    if (backup) logger?.info({ backup }, `Copia de seguridad de la base de datos antes de migrar: ${backup}`);
     migrate(db);
   } catch (err) {
     db.close(); // no dejar el archivo bloqueado (en Windows impediría borrarlo o reabrirlo)
     throw err;
   }
   return db;
+}
+
+/**
+ * Copia de seguridad antes de migrar: si la base ya existía (versión ≥ 1) y le
+ * faltan migraciones, la copia completa (con lo que haya en el WAL) a
+ * `<carpeta>/backups/<nombre>.v<versión>.<fecha>.db` con `VACUUM INTO`, que es
+ * síncrono y produce una copia consistente. Si la copia falla, lanza un error y
+ * NO se aplica ninguna migración.
+ * @returns {string|null} ruta de la copia, o null si no hacía falta (base nueva o al día)
+ */
+export function backupBeforeMigrating(db, file, { migrations = MIGRATIONS, now = Date.now() } = {}) {
+  const current = db.pragma('user_version', { simple: true });
+  if (current === 0 || current >= migrations.length) return null;
+  const stamp = new Date(now).toISOString().replace(/[:.]/g, '-'); // sin ":" (no válido en Windows)
+  const target = path.join(path.dirname(file), 'backups', `${path.basename(file, path.extname(file))}.v${current}.${stamp}.db`);
+  try {
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    db.prepare('VACUUM INTO ?').run(target);
+  } catch (err) {
+    throw new Error(
+      `No se pudo crear la copia de seguridad antes de migrar (${target}): ${err.message}. No se aplicó ninguna migración.`,
+      { cause: err },
+    );
+  }
+  return target;
 }
 
 /**

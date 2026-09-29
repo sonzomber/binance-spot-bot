@@ -1,6 +1,7 @@
 /**
- * Resultados de backtests: se guardan en SQLite (con parámetros, período y fecha)
- * y las operaciones se exportan a CSV, para mostrarlos después en un panel.
+ * Resultados de backtests: se guardan en SQLite (con parámetros, período, fecha,
+ * operaciones y curva de capital) y las operaciones se exportan a CSV, para
+ * mostrarlos después en el panel.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -19,15 +20,17 @@ export class BacktestStore {
         `INSERT INTO backtest_trades (run_id, n, entry_time, entry_price, exit_time, exit_price, qty, fees, pnl, pnl_pct)
          VALUES (@runId, @n, @entryTime, @entryPrice, @exitTime, @exitPrice, @qty, @fees, @pnl, @pnlPct)`,
       ),
+      insertEquity: db.prepare('INSERT INTO backtest_equity (run_id, n, time, equity) VALUES (?, ?, ?, ?)'),
       setCsv: db.prepare('UPDATE backtest_runs SET csv_path = ? WHERE id = ?'),
       run: db.prepare('SELECT * FROM backtest_runs WHERE id = ?'),
       trades: db.prepare('SELECT * FROM backtest_trades WHERE run_id = ? ORDER BY n'),
+      equity: db.prepare('SELECT n, time, equity FROM backtest_equity WHERE run_id = ? ORDER BY n'),
       list: db.prepare('SELECT * FROM backtest_runs ORDER BY id DESC LIMIT ?'),
       group: db.prepare('SELECT * FROM backtest_runs WHERE group_id = ? ORDER BY id'),
     };
   }
 
-  /** Guarda un resultado y sus operaciones (atómico). @returns {number} id */
+  /** Guarda un resultado, sus operaciones y su curva de capital (atómico). @returns {number} id */
   saveRun({ groupId, segment, createdAt, dataEnv, strategy, params, symbol, timeframe, report, capital, feeRate, slippageBps, settings }) {
     return this.db.transaction(() => {
       const { tradesList, decisions, equity, ...metrics } = report;
@@ -38,6 +41,8 @@ export class BacktestStore {
         capital, feeRate, slippageBps, settings: JSON.stringify(settings), metrics: JSON.stringify(metrics), csvPath: null,
       });
       for (const trade of tradesList) this.sql.insertTrade.run({ runId, ...trade });
+      // Curva de capital: n = 0 es el capital inicial; n ≥ 1, el valor al cierre de cada vela.
+      (equity ?? []).forEach((point, n) => this.sql.insertEquity.run(runId, n, point.time, point.value));
       return Number(runId);
     })();
   }
@@ -49,6 +54,15 @@ export class BacktestStore {
   getRun(id) {
     const row = this.sql.run.get(id);
     return row ? { ...parseRow(row), trades: this.sql.trades.all(id) } : null;
+  }
+
+  /**
+   * Curva de capital de un resultado. Vacía en los guardados antes de la v5 del
+   * esquema (se puede recalcular: los backtests son reproducibles).
+   * @returns {Array<{ n: number, time: number, equity: number }>}
+   */
+  getEquity(runId) {
+    return this.sql.equity.all(runId);
   }
 
   listRuns(limit = 20) {

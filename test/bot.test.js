@@ -11,6 +11,7 @@ import { loadConfig } from '../src/config/index.js';
 import { KillSwitch } from '../src/risk/kill-switch.js';
 import { RiskManager } from '../src/risk/risk-manager.js';
 import { openDatabase } from '../src/storage/db.js';
+import { BotStatusStore } from '../src/storage/bot-status-store.js';
 import { RiskStore } from '../src/storage/risk-store.js';
 import { captureLogger, tempDir, testEnv } from './helpers.js';
 
@@ -244,5 +245,79 @@ describe('heartbeat', () => {
     expect(count()).toBe(1); // al arrancar
     await vi.advanceTimersByTimeAsync(3 * 60_000); // HEARTBEAT_SECONDS=60
     expect(count()).toBe(4);
+  });
+});
+
+// ---------------------------------------------------------------------------------
+describe('estado para el panel (bot_status)', () => {
+  /** Reemplaza el bot del contexto por uno con registro de estado (afterEach lo apaga). */
+  function botWithStatus(status) {
+    ctx.bot = new TradingBot({
+      config: ctx.bot.config, strategy: ctx.strategy, feed: ctx.feed, executor: ctx.executor, risk: ctx.risk,
+      killSwitch: ctx.bot.killSwitch, logger: ctx.logs.logger, resources: ctx.resources, status,
+    });
+    return ctx.bot;
+  }
+  const iso = (ms) => new Date(ms).toISOString();
+
+  it('guarda el arranque, cada heartbeat, cada vela procesada y el apagado (con motivo)', async () => {
+    const status = new BotStatusStore(ctx.db, { env: 'testnet', mode: 'dry-run' });
+    status.start({ time: T0, pid: 1, heartbeatMs: 60_000, strategy: 'test', params: {}, symbol: 'BTC/USDT', timeframe: '1m' });
+    const stopping = vi.spyOn(status, 'stopping');
+    const bot = botWithStatus(status);
+
+    bot.start();
+    expect(status.get()).toMatchObject({ state: 'running', heartbeatAt: expect.any(String), lastCandle: null });
+
+    ctx.strategy.evaluate.mockReturnValue({ action: 'HOLD', code: 'X', reason: 'x' });
+    emit(2, 85_000);
+    await vi.waitFor(() => expect(status.get().lastCandle).toBe(iso(T0 + 2 * MIN))); // sin esperar al heartbeat
+
+    bot.heartbeat();
+    // precio = cierre de la última vela; su hora = el cierre (inicio + 1 min)
+    expect(status.get()).toMatchObject({ price: 85_000, priceTime: iso(T0 + 3 * MIN) });
+    ctx.feed.emit('price', { price: 85_100, time: T0 + 3 * MIN + 5000 }); // precio en vivo, posterior
+    bot.heartbeat();
+    expect(status.get()).toMatchObject({ price: 85_100, priceTime: iso(T0 + 3 * MIN + 5000) });
+
+    await bot.shutdown('Ctrl+C de prueba');
+    expect(stopping).toHaveBeenCalledWith(expect.objectContaining({ reason: 'Ctrl+C de prueba' }));
+    expect(status.get()).toMatchObject({ state: 'stopped', stopReason: 'Ctrl+C de prueba', exitCode: 0, stoppedAt: expect.any(String) });
+  });
+
+  it('una parada de riesgo queda registrada con su motivo y código de salida', async () => {
+    const status = new BotStatusStore(ctx.db, { env: 'testnet', mode: 'dry-run' });
+    status.start({ time: T0, pid: 1, heartbeatMs: 60_000, strategy: 'test', params: {}, symbol: 'BTC/USDT', timeframe: '1m' });
+    ctx.risk.recordEntry({ symbol: 'BTC/USDT', qty: 1, price: 100 });
+    ctx.risk.recordExit({ symbol: 'BTC/USDT', qty: 1, price: 70 }); // −30 > 20
+    const bot = botWithStatus(status);
+    bot.start();
+    emit(0);
+    await bot.stopped;
+    expect(status.get()).toMatchObject({ state: 'stopped', exitCode: 1, stopReason: expect.stringMatching(/parada de riesgo: pérdida del día/) });
+  });
+
+  it('si guardar el estado falla, el bot sigue IGUAL: procesa, opera y se apaga normalmente', async () => {
+    const broken = () => { throw new Error('disco lleno'); };
+    const status = { running: vi.fn(broken), heartbeat: vi.fn(broken), candleProcessed: vi.fn(broken), stopping: vi.fn(broken), stopped: vi.fn(broken) };
+    const bot = botWithStatus(status);
+
+    bot.start();
+    emit(0, 84_000);
+    await vi.waitFor(() => expect(ctx.executor.submit).toHaveBeenCalledTimes(1)); // la señal se operó
+    await vi.waitFor(() => expect(status.candleProcessed).toHaveBeenCalled());
+    emit(1, 84_000);
+    await vi.waitFor(() => expect(ctx.executor.submit).toHaveBeenCalledTimes(2)); // y el ciclo sigue
+    expect(bot.consecutiveErrors).toBe(0); // no cuenta como error procesando velas
+
+    const result = await bot.shutdown('prueba');
+    expect(result).toEqual({ reason: 'prueba', exitCode: 0, timedOut: false });
+    expect(ctx.executor.cancelAll).toHaveBeenCalledTimes(1);
+    expect(ctx.closed).toEqual(['feed', 'monitor', 'hora', 'cliente', 'base de datos']);
+    expect(status.stopped).toHaveBeenCalled();
+    const warnings = ctx.logs.lines.filter((l) => l.level === 40).map((l) => l.msg);
+    expect(warnings).toContain('No se pudo guardar el estado del bot para el panel (heartbeat); el bot sigue normalmente');
+    expect(warnings).toContain('No se pudo guardar el estado del bot para el panel (vela procesada); el bot sigue normalmente');
+    expect(ctx.logs.messages().join('\n')).toMatch(/Bot detenido: prueba/);
   });
 });

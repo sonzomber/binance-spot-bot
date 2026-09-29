@@ -28,7 +28,7 @@ try {
 }
 
 const logger = createLogger(config.log);
-const db = openDatabase(config.storage.dbPath);
+const db = openDatabase(config.storage.dbPath, { logger });
 let timeSync;
 const limiter = new WeightLimiter({ logger, now: () => (timeSync ? timeSync.now() : Date.now()) });
 const exchange = createTradingExchange(config, { limiter });

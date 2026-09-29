@@ -9,32 +9,23 @@
  * Si el bot está corriendo, lo detecta en ~1 s, cancela las órdenes pendientes
  * y se detiene. Si no está corriendo, no podrá arrancar hasta `npm run resume`,
  * que reanuda el entorno y modo configurados en el .env.
+ *
+ * La lógica está en src/risk/kill-command.js: el panel usa la misma función.
  */
 import { loadEnvFile, loadPaths } from '../src/config/index.js';
-import { KillSwitch } from '../src/risk/kill-switch.js';
-import { RiskCode } from '../src/risk/risk-manager.js';
-import { openDatabase } from '../src/storage/db.js';
-import { RiskStore } from '../src/storage/risk-store.js';
+import { activateKillSwitch } from '../src/risk/kill-command.js';
 
 loadEnvFile();
 const paths = loadPaths();
 const reason = process.argv.slice(2).join(' ').trim() || 'kill switch manual';
 
-// 1. Primero el archivo: es lo que vigila el bot y no depende de la base de datos.
-new KillSwitch(paths.killSwitchFile).activate(reason);
+// 1. El archivo (lo que vigila el bot) y 2. la parada en SQLite. Si 2 falla, el archivo basta.
+const result = activateKillSwitch({ killSwitchFile: paths.killSwitchFile, dbPath: paths.dbPath, reason });
 console.log(`Kill switch ACTIVADO (${paths.killSwitchFile}): ${reason}`);
-
-// 2. Además, deja la parada guardada en SQLite. Si esto falla, el archivo basta.
-let db;
-try {
-  db = openDatabase(paths.dbPath);
-  // Detiene TODOS los entornos y modos: el kill switch no depende de la config.
-  const count = RiskStore.haltAll(db, { code: RiskCode.KILL_SWITCH, reason: `kill switch: ${reason}`, time: Date.now() });
-  console.log(`Parada registrada en la base de datos (${count} entorno(s)/modo(s) detenidos).`);
-} catch (err) {
-  console.warn(`Aviso: no se pudo registrar la parada en la base de datos (${err.message}). El archivo es suficiente.`);
-} finally {
-  db?.close();
+if (result.dbError) {
+  console.warn(`Aviso: no se pudo registrar la parada en la base de datos (${result.dbError.message}). El archivo es suficiente.`);
+} else {
+  console.log(`Parada registrada en la base de datos (${result.halted} entorno(s)/modo(s) detenidos).`);
 }
 
 console.log('Si el bot está corriendo, cancelará las órdenes pendientes y se detendrá en ~1 segundo.');

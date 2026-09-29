@@ -68,7 +68,7 @@ try {
   if (!TIMEFRAMES.includes(timeframe)) throw new BacktestError(`--timeframe debe ser uno de: ${TIMEFRAMES.join(', ')}`);
 
   const logger = createLogger({ ...config.log, level: 'warn' });
-  db = openDatabase(config.storage.dbPath);
+  db = openDatabase(config.storage.dbPath, { logger });
   const result = await backtestCommand(
     {
       symbol: (args.symbol ?? config.symbol).toUpperCase(),
