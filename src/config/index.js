@@ -150,6 +150,12 @@ const envShape = z.object({
   DB_PATH: envValue(z.string().trim().default('./data/bot.db')),
 });
 
+/**
+ * Las variables SIN secretos (todas menos las API keys), con las mismas reglas.
+ * Lo usa el panel, que nunca lee las API keys.
+ */
+export const publicEnvShape = envShape.omit({ BINANCE_API_KEY: true, BINANCE_API_SECRET: true });
+
 const envSchema = envShape.superRefine((env, ctx) => {
   // Para enviar órdenes (aunque sea al testnet) hacen falta credenciales.
   if (!env.DRY_RUN) {
