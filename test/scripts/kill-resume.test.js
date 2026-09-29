@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { PROJECT_ROOT } from '../../src/config/index.js';
 import { openDatabase } from '../../src/storage/db.js';
 import { RiskStore } from '../../src/storage/risk-store.js';
+import { ALL_TRADING_SCOPES } from '../../src/storage/scope.js';
 import { tempDir } from '../helpers.js';
 
 const run = promisify(execFile);
@@ -35,10 +36,10 @@ function exec(name, args = [], env = {}) {
   });
 }
 
-function haltState() {
+function haltState(scope = { env: 'testnet', mode: 'dry-run' }) {
   const db = openDatabase(files.DB_PATH);
   try {
-    return new RiskStore(db).getHaltState();
+    return new RiskStore(db, scope).getHaltState();
   } finally {
     db.close();
   }
@@ -51,7 +52,11 @@ describe('npm run kill', () => {
 
     expect(stdout).toMatch(/Kill switch ACTIVADO/);
     expect(JSON.parse(fs.readFileSync(files.KILL_SWITCH_FILE, 'utf8'))).toMatchObject({ reason: 'volatilidad extrema' });
-    expect(haltState()).toMatchObject({ halted: true, code: 'KILL_SWITCH', reason: 'kill switch: volatilidad extrema' });
+    // El kill switch detiene todos los entornos y modos
+    expect(stdout).toMatch(/4 entorno\(s\)\/modo\(s\) detenidos/);
+    for (const scope of ALL_TRADING_SCOPES) {
+      expect(haltState(scope)).toMatchObject({ halted: true, code: 'KILL_SWITCH', reason: 'kill switch: volatilidad extrema' });
+    }
   }, 20_000);
 });
 

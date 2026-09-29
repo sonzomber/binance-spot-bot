@@ -5,8 +5,10 @@
  *   npm run kill -- "motivo"        → con motivo
  *
  * Funciona aunque la config tenga errores: solo lee las rutas de archivos.
+ * Detiene TODOS los entornos y modos (testnet/demo × dry-run/exchange).
  * Si el bot está corriendo, lo detecta en ~1 s, cancela las órdenes pendientes
- * y se detiene. Si no está corriendo, no podrá arrancar hasta `npm run resume`.
+ * y se detiene. Si no está corriendo, no podrá arrancar hasta `npm run resume`,
+ * que reanuda el entorno y modo configurados en el .env.
  */
 import { loadEnvFile, loadPaths } from '../src/config/index.js';
 import { KillSwitch } from '../src/risk/kill-switch.js';
@@ -26,11 +28,9 @@ console.log(`Kill switch ACTIVADO (${paths.killSwitchFile}): ${reason}`);
 let db;
 try {
   db = openDatabase(paths.dbPath);
-  const store = new RiskStore(db);
-  if (!store.getHaltState().halted) {
-    store.setHalt({ code: RiskCode.KILL_SWITCH, reason: `kill switch: ${reason}`, time: Date.now() });
-  }
-  console.log('Parada registrada en la base de datos.');
+  // Detiene TODOS los entornos y modos: el kill switch no depende de la config.
+  const count = RiskStore.haltAll(db, { code: RiskCode.KILL_SWITCH, reason: `kill switch: ${reason}`, time: Date.now() });
+  console.log(`Parada registrada en la base de datos (${count} entorno(s)/modo(s) detenidos).`);
 } catch (err) {
   console.warn(`Aviso: no se pudo registrar la parada en la base de datos (${err.message}). El archivo es suficiente.`);
 } finally {

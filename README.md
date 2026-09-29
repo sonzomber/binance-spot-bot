@@ -67,9 +67,10 @@ PnL del día = PnL realizado  (operaciones cerradas hoy UTC, comisión de compra
 ### Kill switch
 
 `npm run kill -- "motivo"` crea el archivo `STOP` (configurable con `KILL_SWITCH_FILE`)
-y registra la parada en la base de datos. También sirve crear el archivo a mano.
-El bot lo revisa cada segundo. `npm run kill` funciona aunque la configuración
-tenga errores: es una herramienta de emergencia.
+y registra la parada en la base de datos para **todos** los entornos y modos.
+También sirve crear el archivo a mano. El bot lo revisa cada segundo.
+`npm run kill` funciona aunque la configuración tenga errores: es una
+herramienta de emergencia.
 
 ### Parada de emergencia
 
@@ -100,10 +101,63 @@ Si la parada fue por pérdida máxima, `npm run resume` se niega mientras la pé
 realizada del día UTC siga en el límite, e indica desde cuándo se puede reanudar
 (00:00 UTC del día siguiente).
 
+`npm run resume` reanuda **solo el entorno y modo configurados** en el `.env`.
+Si el kill switch detuvo todo y luego cambias de entorno (p. ej. de `dry-run` a
+enviar órdenes al testnet), ese otro entorno también requiere su propio `resume`.
+
 ### Persistencia
 
 El estado de riesgo vive en SQLite (`DB_PATH`, por defecto `data/bot.db`):
 la parada, las posiciones (con sus comisiones) y una bitácora de eventos.
 **Reiniciar el bot no resetea nada**: la pérdida acumulada del día, las posiciones
-abiertas y la parada se recuperan al arrancar. Lo simulado (`dry-run`) y lo
-enviado al exchange (`testnet`/`demo`) se guardan por separado.
+abiertas y la parada se recuperan al arrancar. Cada entorno y modo tiene su
+propio estado (ver [Almacenamiento](#almacenamiento)).
+
+## Almacenamiento
+
+Todo se guarda en SQLite (`DB_PATH`). El esquema se crea y actualiza con
+**migraciones versionadas** ([src/storage/migrations.js](src/storage/migrations.js)):
+cada una se aplica una sola vez, en su propia transacción, y queda registrada en
+la tabla `schema_migrations`. `npm run status` muestra la versión actual.
+
+### Entornos: los datos nunca se mezclan
+
+Cada registro indica su **entorno** y, si es de trading, su **modo**:
+
+| Entorno | Qué es | Qué se guarda |
+|---|---|---|
+| `testnet` | Spot Testnet | órdenes, ejecuciones, posiciones, riesgo, eventos, velas |
+| `demo` | Demo Mode | órdenes, ejecuciones, posiciones, riesgo, eventos, velas |
+| `production-readonly` | datos públicos de producción, **solo lectura** | solo velas (para el backtest) |
+
+| Modo | Qué es |
+|---|---|
+| `dry-run` | órdenes simuladas, nunca enviadas |
+| `exchange` | órdenes enviadas al exchange del entorno (testnet o demo) |
+
+Cada repositorio se crea para un entorno (y modo) y **todas** sus consultas y
+reportes filtran por él. La base de datos también lo garantiza por su cuenta:
+no acepta órdenes, posiciones ni eventos de producción, y un trigger impide que
+una ejecución o una posición quede enlazada a una orden de otro entorno.
+
+### Tablas
+
+| Tabla | Contenido |
+|---|---|
+| `orders` | cada orden: ID de Binance, `clientOrderId` propio, par, lado, tipo, cantidad, precio, estado, cantidad ejecutada, precio promedio, comisión y timestamps. **Incluye las rechazadas**, con su origen (`risk` o `exchange`), código y motivo |
+| `order_fills` | ejecuciones parciales de cada orden, con su comisión (moneda original y valor en USDT). La misma ejecución nunca se cuenta dos veces |
+| `positions` | compra → venta, con comisiones y PnL realizado |
+| `risk_state` | parada activa, una fila por entorno × modo |
+| `events` | bitácora: paradas, reanudaciones, fallos al cancelar |
+| `candles` | caché de velas cerradas; clave única (entorno, par, intervalo, inicio) |
+
+Estados de una orden: `pending` (registrada, aún sin confirmar) → `open` →
+`partially_filled` → `filled`, o bien `canceled` / `expired` / `rejected`.
+
+### Caché de velas y huecos
+
+Las velas se guardan solo si están **cerradas** y **alineadas** a su intervalo;
+repetir una descarga no crea duplicados. Antes de un backtest se buscan
+**huecos** (velas faltantes en el rango) y se muestra un aviso con cada hueco y
+el porcentaje faltante: un hueco puede ser real (mantenimiento de Binance) o un
+error de descarga, y en ambos casos el backtest saltaría ese periodo.

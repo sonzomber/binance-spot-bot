@@ -122,8 +122,8 @@ describe('loadConfig — validaciones', () => {
   it('el modo separa lo simulado de lo enviado al exchange', () => {
     const keys = { BINANCE_API_KEY: 'k', BINANCE_API_SECRET: 's' };
     expect(load({ DRY_RUN: 'true' }).mode).toBe('dry-run');
-    expect(load({ DRY_RUN: 'false', ...keys }).mode).toBe('testnet');
-    expect(load({ DRY_RUN: 'false', BINANCE_ENV: 'demo', ...keys }).mode).toBe('demo');
+    expect(load({ DRY_RUN: 'false', ...keys })).toMatchObject({ env: 'testnet', mode: 'exchange' });
+    expect(load({ DRY_RUN: 'false', BINANCE_ENV: 'demo', ...keys })).toMatchObject({ env: 'demo', mode: 'exchange' });
   });
 
   it('valida MAX_OPEN_POSITIONS (entero ≥ 1)', () => {

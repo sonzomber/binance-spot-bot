@@ -47,19 +47,18 @@ const positive = (n) => typeof n === 'number' && Number.isFinite(n) && n > 0;
 export class RiskManager {
   /**
    * @param {object} deps
-   * @param {RiskStore} deps.store
+   * @param {RiskStore} deps.store repositorio atado a un ámbito (entorno + modo)
    * @param {KillSwitch} deps.killSwitch
-   * @param {string} deps.mode 'dry-run' | 'testnet' | 'demo'
    * @param {{ maxTradeUsdt: number, maxDailyLossUsdt: number, maxOpenPositions: number }} deps.limits
    * @param {number} deps.feeRate comisión estimada (0.001 = 0.1%)
    * @param {number} deps.slippageBps slippage estimado en puntos básicos
    * @param {import('pino').Logger} deps.logger
    * @param {() => number} [deps.now] reloj inyectable (tests)
    */
-  constructor({ store, killSwitch, mode, limits, feeRate, slippageBps, logger, now = Date.now }) {
+  constructor({ store, killSwitch, limits, feeRate, slippageBps, logger, now = Date.now }) {
     this.store = store;
+    this.scope = store.scope;
     this.killSwitch = killSwitch;
-    this.mode = mode;
     this.limits = Object.freeze({ ...limits });
     this.feeRate = feeRate;
     this.slippageBps = slippageBps;
@@ -84,10 +83,10 @@ export class RiskManager {
    */
   dailyPnl(markPrices = {}) {
     const day = utcDay(this.now());
-    const realized = this.store.realizedForDay(this.mode, day);
+    const realized = this.store.realizedForDay(day);
     let unrealized = 0;
     const missingPrices = [];
-    for (const position of this.store.openPositions(this.mode)) {
+    for (const position of this.store.openPositions()) {
       let price = markPrices[position.symbol];
       if (!positive(price)) {
         missingPrices.push(position.symbol);
@@ -169,7 +168,7 @@ export class RiskManager {
    * redondeada hacia abajo al paso del par.
    */
   sizeSell({ market }) {
-    const position = this.store.oldestOpenPosition(this.mode, market.symbol);
+    const position = this.store.oldestOpenPosition(market.symbol);
     if (!position) return null;
     return { amount: roundDownToStep(position.qty, market.precision?.amount), position };
   }
@@ -213,7 +212,7 @@ export class RiskManager {
 
     // 2. Límites de exposición
     if (side === 'buy') {
-      const open = this.store.openPositions(this.mode).length;
+      const open = this.store.openPositions().length;
       if (open >= this.limits.maxOpenPositions) {
         return reject(
           RiskCode.MAX_POSITIONS,
@@ -233,7 +232,7 @@ export class RiskManager {
     } else {
       // Vender reduce la exposición: no se limita por MAX_TRADE_USDT, pero en Spot
       // solo se puede vender lo que se tiene.
-      const position = this.store.oldestOpenPosition(this.mode, symbol);
+      const position = this.store.oldestOpenPosition(symbol);
       if (!position) {
         return reject(RiskCode.NO_POSITION, `no hay posición abierta en ${symbol} (en Spot solo se vende lo que se tiene)`);
       }
@@ -256,19 +255,19 @@ export class RiskManager {
 
   /**
    * Registra una compra ejecutada (abre una posición).
-   * @param {{ symbol: string, qty: number, price: number, feeQuote?: number, time?: number }} fill
-   *        qty: base recibida neta de comisión; feeQuote: comisión en USDT
+   * @param {{ symbol: string, qty: number, price: number, feeQuote?: number, time?: number, orderId?: number }} fill
+   *        qty: base recibida neta de comisión; feeQuote: comisión en USDT; orderId: fila en la tabla orders
    */
-  recordEntry({ symbol, qty, price, feeQuote = 0, time = this.now() }) {
+  recordEntry({ symbol, qty, price, feeQuote = 0, time = this.now(), orderId = null }) {
     assertFill({ qty, price, feeQuote });
     const position = this.store.insertPosition({
-      mode: this.mode,
       symbol,
       qty,
       entryPrice: price,
       entryFee: feeQuote,
       entryCost: entryCost({ qty, price, feeQuote }),
       entryTime: time,
+      entryOrderId: orderId,
     });
     this.logger.info(
       { positionId: position.id, symbol, qty, price, fee: feeQuote, cost: position.entryCost },
@@ -282,9 +281,9 @@ export class RiskManager {
    * Si por el paso del par quedó un residuo sin vender ("dust"), su costo se
    * cuenta igual como pérdida: es conservador.
    */
-  recordExit({ symbol, qty, price, feeQuote = 0, time = this.now() }) {
+  recordExit({ symbol, qty, price, feeQuote = 0, time = this.now(), orderId = null }) {
     assertFill({ qty, price, feeQuote });
-    const position = this.store.oldestOpenPosition(this.mode, symbol);
+    const position = this.store.oldestOpenPosition(symbol);
     if (!position) throw new RiskError(`no hay posición abierta en ${symbol} para registrar la venta`);
 
     const proceeds = exitProceeds({ qty, price, feeQuote });
@@ -295,6 +294,7 @@ export class RiskManager {
       exitProceeds: proceeds,
       exitTime: time,
       exitDay: utcDay(time),
+      exitOrderId: orderId,
       realizedPnl: proceeds - position.entryCost,
     });
     this.logger.info(
@@ -379,7 +379,7 @@ export class RiskManager {
   resume({ by = 'manual' } = {}) {
     const now = this.now();
     const day = utcDay(now);
-    const { pnl: realized } = this.store.realizedForDay(this.mode, day);
+    const { pnl: realized } = this.store.realizedForDay(day);
     if (realized <= -this.limits.maxDailyLossUsdt) {
       throw new RiskError(
         `no se puede reanudar todavía: la pérdida realizada del día ${day} UTC (${usdt(realized)}) ` +
@@ -413,9 +413,8 @@ function assertFill({ qty, price, feeQuote }) {
 /** Arma el RiskManager a partir de la config y una base de datos abierta. */
 export function createRiskManager(config, db, logger, { now } = {}) {
   return new RiskManager({
-    store: new RiskStore(db),
+    store: new RiskStore(db, { env: config.env, mode: config.mode }),
     killSwitch: new KillSwitch(config.risk.killSwitchFile),
-    mode: config.mode,
     limits: {
       maxTradeUsdt: config.risk.maxTradeUsdt,
       maxDailyLossUsdt: config.risk.maxDailyLossUsdt,

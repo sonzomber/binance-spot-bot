@@ -9,15 +9,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import { z } from 'zod';
+import { TIMEFRAMES } from '../lib/timeframes.js';
 
 export const PROJECT_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 
 /** Entornos soportados. Mainnet no existe aquí a propósito. */
 export const ENVIRONMENTS = Object.freeze(['testnet', 'demo']);
 
-export const TIMEFRAMES = Object.freeze([
-  '1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d',
-]);
+export { TIMEFRAMES };
 
 const LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent'];
 const TRUE_VALUES = ['true', '1', 'yes'];
@@ -193,8 +192,9 @@ export function loadConfig(env = process.env) {
     apiKey: e.BINANCE_API_KEY,
     apiSecret: e.BINANCE_API_SECRET,
     dryRun: e.DRY_RUN,
-    // Modo de operación: separa en la base de datos lo simulado de lo enviado al exchange.
-    mode: e.DRY_RUN ? 'dry-run' : e.BINANCE_ENV,
+    // Modo: 'dry-run' (simulado) o 'exchange' (enviado al exchange de env). Junto con
+    // env forma el ámbito de los datos guardados: ver src/storage/scope.js.
+    mode: e.DRY_RUN ? 'dry-run' : 'exchange',
     symbol: e.SYMBOL,
     timeframe: e.TIMEFRAME,
     dataFeed: e.DATA_FEED,

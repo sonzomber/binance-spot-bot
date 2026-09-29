@@ -28,9 +28,8 @@ async function session(fn, { maxDailyLossUsdt = 20 } = {}) {
   const db = openDatabase(path.join(tmp.dir, 'bot.db'));
   try {
     const risk = new RiskManager({
-      store: new RiskStore(db),
+      store: new RiskStore(db, { env: 'testnet', mode: 'dry-run' }),
       killSwitch: new KillSwitch(path.join(tmp.dir, 'STOP')),
-      mode: 'dry-run',
       limits: { maxTradeUsdt: 50, maxDailyLossUsdt, maxOpenPositions: 1 },
       feeRate: 0.001,
       slippageBps: 5,
@@ -78,7 +77,7 @@ describe('reinicio con estado guardado', () => {
     await session((risk) => risk.recordEntry({ symbol: SYMBOL, qty: 0.00059, price: 84_000, feeQuote: 0.05 }));
 
     await session((risk) => {
-      const [position] = risk.store.openPositions('dry-run');
+      const [position] = risk.store.openPositions();
       expect(position).toMatchObject({ symbol: SYMBOL, qty: 0.00059, entryFee: 0.05 });
       expect(risk.checkOrder(buyOrder, { market }).code).toBe(RiskCode.MAX_POSITIONS);
     });

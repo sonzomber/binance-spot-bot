@@ -11,15 +11,21 @@ const cleanups = [];
 afterEach(() => cleanups.splice(0).forEach((fn) => fn()));
 
 /** RiskManager con SQLite en memoria, reloj controlable y logger capturado. */
-async function setup({ limits = {}, mode = 'dry-run', feeRate = 0.001, slippageBps = 5, db, clock } = {}) {
+async function setup({
+  limits = {},
+  scope = { env: 'testnet', mode: 'dry-run' },
+  feeRate = 0.001,
+  slippageBps = 5,
+  db,
+  clock,
+} = {}) {
   const tmp = await tempDir();
   const capture = await captureLogger();
   const database = db ?? openDatabase(':memory:');
   const theClock = clock ?? createClock();
   const risk = new RiskManager({
-    store: new RiskStore(database),
+    store: new RiskStore(database, scope),
     killSwitch: new KillSwitch(path.join(tmp.dir, 'STOP')),
-    mode,
     limits: { maxTradeUsdt: 50, maxDailyLossUsdt: 20, maxOpenPositions: 1, ...limits },
     feeRate,
     slippageBps,
@@ -108,14 +114,16 @@ describe('límite: máximo de posiciones abiertas (MAX_OPEN_POSITIONS)', () => {
     expect(buy().ok).toBe(true);
   });
 
-  it('las posiciones simuladas (dry-run) no cuentan en testnet, y viceversa', async () => {
+  it('las posiciones de un entorno/modo no cuentan en otro', async () => {
     const db = openDatabase(':memory:');
     cleanups.push(() => db.close());
-    const dry = await setup({ db, mode: 'dry-run' });
-    const live = await setup({ db, mode: 'testnet' });
+    const dry = await setup({ db, scope: { env: 'testnet', mode: 'dry-run' } });
+    const sent = await setup({ db, scope: { env: 'testnet', mode: 'exchange' } });
+    const demo = await setup({ db, scope: { env: 'demo', mode: 'dry-run' } });
     dry.risk.recordEntry({ symbol: SYMBOL, qty: 0.00059, price: 84_000 });
     expect(dry.risk.checkOrder(order('buy', 0.00059, 84_000), { market }).code).toBe(RiskCode.MAX_POSITIONS);
-    expect(live.risk.checkOrder(order('buy', 0.00059, 84_000), { market }).ok).toBe(true);
+    expect(sent.risk.checkOrder(order('buy', 0.00059, 84_000), { market }).ok).toBe(true);
+    expect(demo.risk.checkOrder(order('buy', 0.00059, 84_000), { market }).ok).toBe(true);
   });
 });
 
