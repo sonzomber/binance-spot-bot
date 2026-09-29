@@ -2,7 +2,8 @@
 
 Bot de trading para **Binance Spot** escrito en Node.js (ES modules): datos de
 mercado en vivo, una estrategia intercambiable, gestión de riesgo obligatoria,
-ejecución idempotente de órdenes, registro en SQLite y backtesting sin sesgo de futuro.
+ejecución idempotente de órdenes, registro en SQLite, backtesting sin sesgo de
+futuro y un panel web de monitoreo de solo lectura.
 
 > [!WARNING]
 > **Proyecto de aprendizaje y portafolio. No es asesoría financiera.**
@@ -23,10 +24,12 @@ ejecución idempotente de órdenes, registro en SQLite y backtesting sin sesgo d
 - [Correr el bot](#correr-el-bot)
 - [Gestión de riesgo](#gestión-de-riesgo)
 - [Backtest](#backtest)
+- [Panel de monitoreo](#panel-de-monitoreo)
 - [Pruebas](#pruebas)
 - [Problemas comunes](#problemas-comunes)
 - [Estructura de carpetas](#estructura-de-carpetas)
 - [Decisiones técnicas](#decisiones-técnicas)
+- [Créditos](#créditos)
 
 ## Qué hace
 
@@ -44,6 +47,9 @@ ejecución idempotente de órdenes, registro en SQLite y backtesting sin sesgo d
 - **Backtest** con velas históricas de producción (solo lectura), con los mismos
   módulos que el bot en vivo, período de ajuste y de validación, y resultados
   guardados en SQLite y CSV.
+- **Panel web** en `http://127.0.0.1:8787`, en un proceso aparte: estado del bot,
+  riesgo del día, gráfico con medias y operaciones, órdenes, logs y backtests, en
+  tiempo real. Es de solo lectura; su única acción es el kill switch.
 
 ## Arquitectura
 
@@ -102,7 +108,12 @@ flowchart LR
 6. **Almacenamiento** ([src/storage](src/storage)). SQLite con migraciones
    versionadas. Cada registro indica su entorno (`testnet`, `demo`,
    `production-readonly`) y su modo (`dry-run`, `exchange`). Los entornos nunca
-   se mezclan en consultas ni reportes.
+   se mezclan en consultas ni reportes. Antes de aplicar una migración a una base
+   que ya tiene datos, se guarda una **copia de seguridad** en `data/backups/`; si la
+   copia falla, no se migra.
+7. **Estado para el panel.** El bot guarda su estado (arranque, heartbeat, última
+   vela, apagado) en la tabla `bot_status`. El [panel](#panel-de-monitoreo) lo lee
+   en otro proceso, sin tocar nada del bot.
 
 **El backtest** reutiliza la misma estrategia, el mismo riesgo y el mismo ejecutor,
 sobre datos históricos:
@@ -120,7 +131,7 @@ flowchart LR
 - **Node.js 22.12 o superior** (probado con Node 24). Recomendado: la versión LTS actual.
 - **npm** (viene con Node).
 - **git** (opcional, para clonar).
-- Sin API keys puedes correr el bot en dry-run, el monitor de datos y el backtest.
+- Sin API keys puedes correr el bot en dry-run, el monitor de datos, el backtest y el panel.
 
 ```bash
 git clone <url-del-repositorio> binance-spot-bot
@@ -129,6 +140,7 @@ npm install
 cp .env.example .env      # en PowerShell también funciona "cp"
 npm test                  # verifica que todo funcione
 npm start                 # arranca en dry-run contra el Spot Testnet
+npm run panel             # (en otra terminal) panel en http://127.0.0.1:8787
 ```
 
 No hacen falta herramientas de compilación: `better-sqlite3` trae binarios
@@ -213,6 +225,7 @@ todos los problemas juntos. Una línea vacía (`CLAVE=`) usa el valor por defect
 | `LOG_LEVEL` | Nivel de log: `trace debug info warn error fatal silent`. | `info` | `debug` |
 | `LOG_FILE` | Archivo de log (JSON, una línea por evento). | `./data/logs/bot.log` | `./logs/bot.log` |
 | `DB_PATH` | Base de datos SQLite. | `./data/bot.db` | `./data/testnet.db` |
+| `PANEL_PORT` | Puerto del [panel](#panel-de-monitoreo) (entre 1024 y 65535). El panel escucha **siempre** solo en `127.0.0.1`. | `8787` | `9000` |
 
 Las rutas relativas se resuelven desde la carpeta del proyecto.
 
@@ -262,6 +275,9 @@ estado de los datos:
 Estado: testnet/dry-run · sma-cross · 0 posición(es) · PnL del día 0 USDT
 ```
 
+Además guarda ese estado en SQLite (tabla `bot_status`) para el panel. Si guardarlo
+falla, solo lo advierte: el bot sigue igual.
+
 **Apagado ordenado con Ctrl+C** (también SIGTERM, una excepción no controlada o una
 promesa rechazada sin manejar):
 
@@ -283,7 +299,9 @@ npm run reconcile    # compara con Binance y ayuda a resolver diferencias
 ```
 
 Con `TIMEFRAME=1m npm run feed` ves cerrarse una vela por minuto. Los logs
-también se guardan en `data/logs/bot.log`, en formato JSON.
+también se guardan en `data/logs/bot.log`, en formato JSON. Las líneas del bot, de
+`resume` y de `reconcile` llevan su ámbito (`"scope":"testnet/dry-run"`); así el panel
+muestra los logs de un entorno sin mezclarlos con otros.
 
 ## Gestión de riesgo
 
@@ -351,7 +369,8 @@ npm run resume              # reanuda (acción manual obligatoria)
 ```
 
 - **`npm run kill`** crea el archivo `STOP` y registra la parada en SQLite para
-  **todos** los entornos y modos.
+  **todos** los entornos y modos. El botón **Kill switch** del
+  [panel](#panel-de-monitoreo) hace exactamente lo mismo (usa la misma función).
   - Si el bot está corriendo, lo detecta en ~1 s: cancela las órdenes pendientes y se detiene.
   - Si no está corriendo, no podrá arrancar.
   - Funciona aunque la configuración tenga errores. También sirve crear el archivo a mano.
@@ -442,10 +461,88 @@ los parámetros se acomodaron al pasado.
 **Resultados guardados.** Cada resultado queda en SQLite:
 - `backtest_runs` guarda parámetros, período, fecha, comisión, slippage, límites,
   filtros del par y todas las métricas;
-- `backtest_trades` guarda cada operación.
+- `backtest_trades` guarda cada operación;
+- `backtest_equity` guarda la curva de capital, vela a vela.
 
 Ajuste y validación comparten `group_id`. Las operaciones se exportan a
-`data/backtests/backtest-<id>-<período>.csv`.
+`data/backtests/backtest-<id>-<período>.csv`. En el panel (pestaña **Backtests**) se
+ven las métricas, la curva de capital contra comprar y mantener, la comparación
+ajuste/validación y el grid probado.
+
+## Panel de monitoreo
+
+```bash
+npm run panel          # compila la interfaz y abre el panel en http://127.0.0.1:8787
+npm run panel:dev      # igual, pero recompila la interfaz al guardar (basta con recargar la página)
+npm run panel:build    # solo compila la interfaz (panel/web/dist)
+```
+
+El panel corre en un **proceso separado** del bot: arranca el bot en una terminal
+(`npm start`) y el panel en otra. Si el panel se cierra o falla, el bot no se entera.
+También sirve sin el bot corriendo: muestra lo último que quedó guardado.
+
+```mermaid
+flowchart LR
+    subgraph P1["Proceso 1: npm start"]
+        BOT["bot"]
+    end
+    subgraph P2["Proceso 2: npm run panel (127.0.0.1)"]
+        SRV["servidor del panel<br/>Express + SSE"]
+    end
+    DB[("data/bot.db<br/>SQLite (WAL)")]
+    LOG[("data/logs/bot.log")]
+    STOP[("STOP")]
+    WEB["navegador<br/>React + Vite"]
+
+    BOT -- escribe --> DB
+    BOT -- escribe --> LOG
+    STOP -. "el bot lo vigila cada 1 s" .-> BOT
+    DB -- "solo lectura" --> SRV
+    LOG -- lectura --> SRV
+    SRV -- "kill switch (única acción)" --> STOP
+    SRV <-- "GET + tiempo real (SSE)" --> WEB
+```
+
+**Qué muestra**
+
+| Sección | Contenido |
+|---|---|
+| **Estado del bot** | Corriendo, detenido, sin responder (sin heartbeat hace más de dos intervalos) o en kill switch; entorno y modo; estrategia y parámetros; si los datos están al día; última vela procesada; último heartbeat. |
+| **Riesgo del día** | PnL del día UTC con comisiones (realizado y no realizado), barra de lo que falta para el límite de pérdida diaria y posiciones abiertas contra el máximo. Lo calcula el mismo `RiskManager` del bot. |
+| **Gráfico** | Velas cerradas del entorno, las medias que calculó la estrategia en cada vela y las compras/ventas ejecutadas. |
+| **Órdenes** | Filtros por estado, lado y `clientOrderId`; precio, cantidad, comisión y motivo de rechazo (quién rechazó y por qué). |
+| **Logs** | Los más recientes, en vivo, con filtro por nivel (info, aviso, error). |
+| **Backtests** | Métricas, parámetros, período, curva de capital contra comprar y mantener, ajuste contra validación y el grid probado. |
+
+Arriba se elige el **entorno y modo** (por ejemplo, Spot Testnet · dry-run): los datos
+de distintos entornos nunca se mezclan. Si el bot no está corriendo, la base no
+existe o todavía no hay datos, cada sección lo dice en lugar de quedar vacía. Tiene
+tema claro y oscuro y se adapta al celular.
+
+**Seguridad.** Aunque solo escucha en tu PC, cualquier página que abras en el
+navegador podría intentar hablarle a `127.0.0.1`. Por eso:
+
+- **Solo `127.0.0.1`.** El host está fijo en el código; solo el puerto se configura
+  (`PANEL_PORT`). Rechaza toda petición cuyo `Host` no sea el del panel (esto frena el
+  "DNS rebinding", un dominio ajeno que se hace pasar por `127.0.0.1`).
+- **Solo lectura.** SQLite se abre en modo `readonly`, y todo lo que no sea GET recibe
+  `405`, salvo la única acción. No hay rutas para crear órdenes, cambiar la
+  configuración ni reanudar el bot. El panel nunca migra la base ni se conecta a Binance.
+- **Kill switch protegido.** Usa **la misma función** que `npm run kill`. Exige que la
+  petición venga del propio panel (`Origin` exacto y `Sec-Fetch-Site`), en JSON, con
+  confirmación y con un **token local** que se genera al iniciar el panel y solo viaja
+  dentro de su página. Otra página no puede leerlo. Reanudar sigue siendo manual:
+  `npm run resume`.
+- **Sin secretos.** El panel lee el `.env` con una lista blanca que **no** incluye las
+  API keys, y vuelve a ocultar cualquier campo con nombre de secreto antes de enviar
+  un log al navegador.
+- **Navegador:** sin CORS, CSP estricta (ningún script ni estilo en línea, nada de
+  otros sitios) y no se puede meter en un iframe.
+
+**Tiempo real.** Por Server-Sent Events: cuando el bot guarda algo en SQLite, cuando
+cambia el kill switch o cuando hay líneas nuevas en el log, el navegador se actualiza
+solo. Si el panel se reinicia con la página abierta, la página lo detecta y pide
+recargar (el token anterior ya no sirve).
 
 ## Pruebas
 
@@ -455,7 +552,7 @@ npm run test:watch     # modo observación mientras editas
 npx vitest run test/backtest    # solo una carpeta
 ```
 
-Son **539 pruebas en 35 archivos**. No usan la red ni API keys: Binance se simula a
+Son **706 pruebas en 49 archivos**. No usan la red ni API keys: Binance se simula a
 nivel HTTP (a través del cliente ccxt real) y el WebSocket con un socket falso.
 Incluyen:
 - la guardia contra mainnet;
@@ -465,7 +562,14 @@ Incluyen:
   parciales y reconciliación;
 - la cola de velas y el apagado ordenado;
 - una integración completa en dry-run;
-- un backtest de 16 velas calculado a mano.
+- un backtest de 16 velas calculado a mano;
+- las migraciones (la v5 solo agrega tablas; copia de seguridad antes de migrar);
+- el panel:
+  - que no exista ninguna ruta de escritura aparte del kill switch;
+  - cada protección del kill switch;
+  - que ninguna respuesta contenga las API keys;
+  - que no importe nada que pueda conectarse a Binance;
+  - la lógica de la interfaz.
 
 ## Problemas comunes
 
@@ -539,6 +643,30 @@ En la terminal funciona normal: primer Ctrl+C = apagado ordenado, segundo = sali
 forzada. Enviar SIGTERM desde otro proceso no existe en Windows: termina el proceso
 de golpe. Usa Ctrl+C o `npm run kill`.
 
+**Panel: "El puerto 8787 ya está en uso"**
+Otro programa (o un panel que ya abriste) usa ese puerto. Ciérralo o cambia
+`PANEL_PORT` en el `.env`.
+
+**Panel: "La base está en la versión 4 y el panel necesita la 5"**
+El panel nunca migra la base. Arranca el bot (o cualquier comando, por ejemplo
+`npm run status`) una vez: aplica la migración y antes guarda una copia de seguridad
+en `data/backups/`.
+
+**Panel: el bot aparece "Sin responder"**
+Su último heartbeat tiene más de dos intervalos. Suele pasar si el proceso se cerró
+de golpe (sin apagado ordenado) o está colgado: revisa la terminal del bot. Si el
+reloj de tu PC está muy desfasado respecto de Binance (más de un par de minutos),
+también puede aparecer: sincroniza la hora del sistema.
+
+**Panel: "El servidor del panel se reinició"**
+Cerraste y volviste a abrir el panel con la página abierta. Recarga la página: el
+kill switch de la página anterior ya no funciona (su token era de la ejecución
+anterior).
+
+**Panel: los números salen con otro formato (`83,595.67` en vez de `83.595,67`)**
+La interfaz usa el idioma del navegador. Si tu navegador está en español de un país
+que usa punto decimal, así se verán.
+
 ## Estructura de carpetas
 
 ```
@@ -568,7 +696,8 @@ binance-spot-bot/
 │   │   ├── risk-manager.js   límites, aprobaciones, PnL diario, parada de emergencia
 │   │   ├── market-filters.js filtros del par (paso, tick, mínimos)
 │   │   ├── pnl.js            PnL con comisiones y día UTC
-│   │   └── kill-switch.js    archivo STOP
+│   │   ├── kill-switch.js    archivo STOP
+│   │   └── kill-command.js   activar el kill switch (npm run kill y el panel)
 │   ├── execution/
 │   │   ├── executor.js       única vía para operar (idempotente)
 │   │   ├── venues.js         ejecución simulada (dry-run) y real (testnet/demo)
@@ -577,18 +706,30 @@ binance-spot-bot/
 │   │   ├── fill-model.js     comisión y slippage simulados
 │   │   └── index.js          armado según el modo
 │   ├── storage/
-│   │   ├── db.js, migrations.js   SQLite y migraciones versionadas
+│   │   ├── db.js, migrations.js   SQLite, migraciones versionadas y copia antes de migrar
 │   │   ├── scope.js               entornos y modos (los datos nunca se mezclan)
 │   │   ├── risk-store.js, order-store.js, candle-store.js, balance-store.js
+│   │   └── bot-status-store.js    estado del bot para el panel
 │   ├── backtest/
 │   │   ├── engine.js         motor (mismos módulos que en vivo)
 │   │   ├── command.js        descarga, huecos, ajuste/validación, guardado
 │   │   ├── market-data-client.js  datos de producción de solo lectura
 │   │   ├── metrics.js, report.js, results.js
 │   └── lib/                  exchange (ccxt protegido), logger, backoff, velas, IDs, intervalos
-├── scripts/                  npm run kill | resume | status | feed | reconcile | backtest
+├── panel/
+│   ├── server/               servidor del panel (proceso aparte, solo 127.0.0.1)
+│   │   ├── index.js, app.js  arranque y rutas (todas GET, salvo el kill switch)
+│   │   ├── security.js       Host, Origin, token, cabeceras
+│   │   ├── config.js         solo variables sin secretos
+│   │   ├── database.js       SQLite en solo lectura
+│   │   ├── live.js           tiempo real (SSE)
+│   │   ├── log-reader.js     lectura y filtro de logs
+│   │   └── queries/          estado, riesgo, velas, órdenes, backtests
+│   └── web/                  interfaz (React + Vite), compilada a web/dist (ignorado por git)
+│       └── src/              App, secciones, componentes, hooks y lib (lógica probada)
+├── scripts/                  npm run kill | resume | status | feed | reconcile | backtest | panel
 ├── test/                     pruebas (Vitest), con simuladores de Binance y WebSocket
-├── data/                     (ignorado por git) bot.db, logs y CSV de backtests
+├── data/                     (ignorado por git) bot.db, logs, CSV de backtests y backups/
 ├── .env.example              plantilla de configuración
 ├── .npmrc                    ignore-scripts=true (instalación sin compilar nada)
 └── package.json
@@ -609,3 +750,20 @@ binance-spot-bot/
   y timestamps; **Vitest** por su soporte nativo de ES modules.
 - **Dinero en USDT y día en UTC** en todo el sistema. Los montos se validan con los
   filtros reales del par antes de enviar cualquier orden.
+- **Panel:**
+  - **Express** en un proceso aparte, con SQLite en solo lectura. Con WAL, leer no
+    bloquea al bot.
+  - **Server-Sent Events** para el tiempo real: la comunicación es en un solo sentido
+    y el navegador se reconecta solo.
+  - **React + Vite** compilado y servido siempre por el mismo servidor, con la misma
+    seguridad. No se usa el servidor de desarrollo de Vite: obligaría a relajar la CSP.
+- **Gráficos con lightweight-charts** de TradingView. Su logo de atribución inserta
+  un estilo en línea que la CSP bloquea, así que se desactiva y se muestra un enlace
+  propio a TradingView (ver [Créditos](#créditos)).
+
+## Créditos
+
+- **TradingView Lightweight Charts™**. Copyright (с) 2025 TradingView, Inc.
+  <https://www.tradingview.com/>. Licencia Apache 2.0. Se usa en los gráficos del panel.
+- **ccxt**, **better-sqlite3**, **Express**, **React**, **Vite**, **pino**, **zod**,
+  **ws** y **Vitest**, cada uno con su propia licencia (ver `node_modules/<paquete>/LICENSE`).

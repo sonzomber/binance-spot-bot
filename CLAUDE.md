@@ -42,8 +42,15 @@ poca experiencia en trading: explícale brevemente los conceptos de trading que 
 9. **Los datos de distintos entornos nunca se mezclan.** Los repositorios se atan a
    un ámbito (entorno + modo) y la base de datos lo refuerza con CHECKs y triggers.
 10. **Las API keys solo van en `.env`**: nunca en el código, en logs (se redactan) ni en git.
-11. **El panel futuro será de solo lectura**, escuchará **solo en localhost** y su
-    **única acción** será activar el kill switch.
+11. **El panel es de solo lectura**, escucha **solo en 127.0.0.1** y su **única
+    acción** es activar el kill switch.
+    - Host fijo en el código; solo el puerto se configura (`PANEL_PORT`).
+    - Nunca agregues rutas que escriban: ni órdenes, ni configuración, ni reanudar.
+      Las pruebas exigen que `POST /api/kill-switch` sea la única ruta que no es GET.
+    - El kill switch usa `activateKillSwitch()` (la misma función que `npm run kill`)
+      y exige Host, Origin exacto, Sec-Fetch-Site, JSON, `confirm: true` y el token local.
+    - El panel nunca lee ni envía API keys ni secretos, nunca migra la base y nunca
+      importa ccxt, ws, el cliente del exchange, la ejecución ni el feed.
 
 ## Forma de trabajo
 
@@ -58,6 +65,12 @@ poca experiencia en trading: explícale brevemente los conceptos de trading que 
   que alguna prueba falla. Si una mutación sobrevive, agregar la prueba que falta.
 - Probar en vivo contra el testnet (endpoints públicos) cuando aplique, usando
   rutas temporales para `DB_PATH` y `KILL_SWITCH_FILE`, sin tocar `data/` del usuario.
+- **Probar la interfaz del panel en el navegador integrado:**
+  - Sobre una **copia** de la base (`VACUUM INTO` desde una conexión de solo lectura),
+    con rutas temporales y otro puerto (8798).
+  - El `launch.json` va en la carpeta de la sesión (`Desktop\Claude\.claude`), fuera del repo.
+  - Revisar consola (violaciones de CSP), tema claro/oscuro, celular (375 px, sin
+    desplazamiento horizontal) y estados vacíos.
 - Ser transparente con errores propios, límites y decisiones pendientes.
 
 ## Comandos
@@ -65,7 +78,7 @@ poca experiencia en trading: explícale brevemente los conceptos de trading que 
 ```bash
 npm install                  # usa .npmrc (ignore-scripts=true); no requiere compilar nada
 cp .env.example .env         # STRATEGY es obligatoria (el ejemplo trae sma-cross)
-npm test                     # Vitest, 539 pruebas; sin red ni API keys
+npm test                     # Vitest, 706 pruebas; sin red ni API keys
 npm start                    # arranca el bot (dry-run por defecto)
 npm run backtest -- --from 2025-01-01 --to 2025-07-01 [--split 2025-05-01] [--grid '{"fast":[5,9],"slow":[21,30]}']
 npm run kill -- "motivo"     # kill switch: detiene todos los entornos y modos
@@ -73,18 +86,22 @@ npm run resume               # reanudación manual del entorno y modo del .env
 npm run status               # estado de riesgo, posiciones, órdenes de hoy, eventos
 npm run feed                 # monitor de datos en vivo (solo lectura)
 npm run reconcile            # diferencias con el exchange (--cancel-unknown, --accept-balances)
+npm run panel                # compila la interfaz y abre el panel en http://127.0.0.1:8787
+npm run panel:dev            # panel + recompilación de la interfaz al guardar
+npm run panel:build          # solo compila la interfaz (panel/web/dist, ignorado por git)
 ```
 
 ## Estado (2026-09-29)
 
-**Terminados los módulos 1 a 9:** base y guardia, estrategia, riesgo,
-almacenamiento, datos, ejecución, ciclo del bot, backtest y README. Hay 539 pruebas
-pasando. Esquema SQLite en la **v4**.
+**Terminados:**
+- **Módulos 1 a 9:** base y guardia, estrategia, riesgo, almacenamiento, datos,
+  ejecución, ciclo del bot, backtest y README.
+- **Panel web, partes 1 a 8:** datos para el panel en el bot, servidor, estructura
+  de la interfaz, estado y riesgo, gráfico, órdenes y logs, backtests y documentación.
+
+Hay 706 pruebas pasando. Esquema SQLite en la **v5**.
 
 Pendientes:
-- **Panel web de monitoreo:** solo lectura, en localhost, con el kill switch como única acción.
-- **Commit del módulo 9:** `README.md` y `.npmrc` están listos pero sin commit, a la
-  espera de la aprobación del usuario.
 - **Decisión del usuario sobre la regla de pérdida diaria:** ver "Decisiones".
 - **Prueba real con órdenes en el testnet:** requiere las API keys del usuario. Todo
   lo de ejecución está probado contra un Binance simulado por HTTP.
@@ -99,14 +116,16 @@ Flujo: **datos → (cola del bot) → estrategia → riesgo → ejecución → a
 | `src/config/` | `index.js` valida el `.env` con zod y devuelve config inmutable (`loadPaths()` para herramientas de emergencia). `safety.js` es la guardia de red (lista blanca exacta de hosts; hook `beforeRequest`). `preflight.js` verifica conexión, mercado y credenciales del entorno. |
 | `src/data/` | `candle-feed.js`: solo velas cerradas, continuas y sin duplicados vía el caché; rellena huecos por REST y, tras reconectar, emite solo la más reciente. `kline-stream.js`: WebSocket propio con pong, rotación a las 23 h, detección de conexión zombi y backoff con jitter. `candle-fetcher.js`: REST paginado. `rate-limiter.js`: peso por cabecera, frena al 80%, 429 → `Retry-After`, 418 → detiene todo. `time-sync.js`: hora del servidor compensando RTT, cada 30 min. `data-health.js`: datos desactualizados. |
 | `src/strategy/` | `base-strategy.js`: interfaz; `evaluate()` valida los datos y devuelve HOLD ante datos vacíos, insuficientes o inválidos. `registry.js`: detecta estrategias en `strategies/`; la activa se elige con `STRATEGY` (obligatoria). `indicators.js`: SMA. `strategies/sma-cross.js`. |
-| `src/risk/` | `risk-manager.js`: `checkOrder()` con aprobaciones, `sizeBuy`/`sizeSell`, PnL diario, `enforceLimits()`, `emergencyStop()`, `resume()`. `market-filters.js`: paso, tick, mínimos, notional. `pnl.js`: PnL con comisiones y día UTC. `kill-switch.js`: archivo `STOP`. |
+| `src/risk/` | `risk-manager.js`: `checkOrder()` con aprobaciones, `sizeBuy`/`sizeSell`, PnL diario, `enforceLimits()`, `emergencyStop()`, `resume()`. `market-filters.js`: paso, tick, mínimos, notional. `pnl.js`: PnL con comisiones y día UTC. `kill-switch.js`: archivo `STOP`. `kill-command.js`: `activateKillSwitch()` (archivo + `haltAll`), usada por `npm run kill` y el panel. |
 | `src/execution/` | `executor.js`: única vía para operar, en cola y con idempotencia. `venues.js`: `PaperVenue` (dry-run) y `ExchangeVenue` (testnet/demo). `order-gate.js`: filtro de red. `reconciler.js`: reconciliación. `fill-model.js`: comisión y slippage, compartido con el backtest. `index.js`: armado según el modo. |
-| `src/storage/` | `db.js`/`migrations.js`: SQLite con migraciones versionadas e historial en `schema_migrations`. `scope.js`: entornos `testnet`, `demo`, `production-readonly` × modos `dry-run`, `exchange`. Repositorios `risk-store`, `order-store`, `candle-store`, `balance-store`. |
+| `src/storage/` | `db.js`/`migrations.js`: SQLite con migraciones versionadas e historial en `schema_migrations`; copia de seguridad (`VACUUM INTO` a `<carpeta>/backups/`) antes de migrar una base con datos. `scope.js`: entornos `testnet`, `demo`, `production-readonly` × modos `dry-run`, `exchange`. Repositorios `risk-store`, `order-store`, `candle-store`, `balance-store`, `bot-status-store` (estado del bot para el panel; `publicSettings()` es la lista blanca de config). |
 | `src/backtest/` | `engine.js`: motor con los módulos reales sobre SQLite en memoria y reloj simulado. `command.js`: datos, huecos, `--split` y `--grid`, guardado. `market-data-client.js`: `data-api.binance.vision`, solo lectura, sin keys ni ccxt. `metrics.js`, `report.js`, `results.js` (SQLite y CSV). |
 | `src/app.js` | Arranque en 5 pasos: config y entorno → hora → estado de riesgo → reconciliación → velas históricas. Si uno falla lanza `StartupError` y cierra lo abierto. |
-| `src/bot.js` | Cola secuencial de velas (límites → estrategia → orden → límites), heartbeat, kill switch en caliente y apagado ordenado. |
+| `src/bot.js` | Cola secuencial de velas (límites → estrategia → orden → límites), heartbeat, kill switch en caliente y apagado ordenado. Guarda su estado en `bot_status` (arranque, heartbeat, cada vela, apagado); si guardar falla, solo lo advierte. |
 | `src/lifecycle.js` | SIGINT/SIGTERM y errores no controlados → apagado ordenado; segundo Ctrl+C fuerza la salida. |
-| `src/lib/` | `exchange.js` (único lugar que crea el cliente ccxt con keys: guardia + filtro de órdenes + limitador), `logger.js`, `backoff.js`, `candles.js`, `ids.js`, `timeframes.js`. |
+| `src/lib/` | `exchange.js` (único lugar que crea el cliente ccxt con keys: guardia + filtro de órdenes + limitador), `logger.js` (con `scope` agrega `"scope":"env/mode"` a cada línea), `backoff.js`, `candles.js`, `ids.js`, `timeframes.js`. |
+| `panel/server/` | Servidor del panel (proceso aparte): `index.js` (arranque, 127.0.0.1, token, `instanceId`), `app.js` (`ROUTES`: todo GET + `POST /api/kill-switch`), `security.js` (Host, métodos, Origin, token, CSP), `config.js` (lista blanca sin secretos; valida `PANEL_PORT`), `database.js` (SQLite `readonly` + `query_only`; informa base inexistente o de otra versión), `live.js` (SSE: `data_version`, STOP, log), `log-reader.js` (filtro y redacción), `queries/` (estado, riesgo con el `RiskManager` real, velas con `strategy.evaluate()`, órdenes, backtests con `buyAndHold()`). |
+| `panel/web/` | Interfaz React + Vite, compilada a `dist/` y servida por el servidor del panel. `src/lib/`: lógica pura y probada (formatos, API, textos, vistas de estado/riesgo/gráfico/órdenes/logs/backtests). `src/sections/`: una por sección. `src/components/`: UI, gráficos (lightweight-charts), diálogo y kill switch. `src/hooks/`: SSE (`live.jsx`), `useApi` (datos atados a su URL: nunca se mezclan ámbitos), tema, reloj. |
 
 ## Decisiones tomadas
 
@@ -146,7 +165,8 @@ Flujo: **datos → (cola del bot) → estrategia → riesgo → ejecución → a
 - **`MAX_TRADE_USDT`** incluye comisión y slippage estimados y aplica solo a compras.
   Las ventas no se limitan por monto.
 - **Kill switch:** `npm run kill` detiene **todos** los ámbitos y funciona con la
-  config rota. `resume` reanuda **solo** el ámbito del `.env`.
+  config rota. El panel usa la misma función (`activateKillSwitch`). `resume` reanuda
+  **solo** el ámbito del `.env`, y únicamente desde la terminal.
 
 **Ejecución**
 - Órdenes de **mercado** únicamente.
@@ -170,9 +190,57 @@ Flujo: **datos → (cola del bot) → estrategia → riesgo → ejecución → a
   valida únicamente esa.
 - La pérdida diaria se reanuda de forma simulada a las 00:00 UTC.
 - IDs deterministas: los resultados son reproducibles.
+- La curva de capital se guarda en `backtest_equity`. Punto 0: capital inicial al
+  inicio del período; punto n ≥ 1: valor al cierre de la vela que empieza en `time`.
+  Los resultados anteriores a la v5 no la tienen: el panel dibuja una curva por
+  operación (escalonada) y sugiere volver a correrlos.
 
 **Migraciones**
 - Nunca edites una migración ya publicada: agrega una nueva al final.
+- Una migración nueva solo **agrega** tablas o columnas, salvo decisión explícita del
+  usuario. Hay una prueba que lo verifica para la v5 (SQL sin DROP/UPDATE/DELETE, y
+  esquema y datos existentes idénticos).
+- `openDatabase()` hace una copia con `VACUUM INTO` antes de migrar una base con
+  datos (`<carpeta de la base>/backups/<nombre>.v<N>.<fecha>.db`). Si la copia falla,
+  no migra.
+
+**Panel**
+- **Proceso separado del bot**, en Express. Lee SQLite en solo lectura (WAL: no bloquea
+  al bot). El bot no sabe que el panel existe; si el panel falla, el bot sigue.
+- **Estado del bot en `bot_status`** (una fila por ámbito), escrito por el bot al
+  arrancar, en cada heartbeat, tras cada vela y al apagarse. Si pasan más de
+  2 intervalos + 10 s sin heartbeat, el estado es "sin responder".
+  - Las horas del bot son del reloj de Binance y el panel usa el de la PC: las edades
+    negativas se muestran como 0.
+- **Tiempo real por SSE:** `PRAGMA data_version` (cambios de otros procesos), el
+  archivo STOP y las líneas nuevas del log. Solo se vigila con alguien conectado.
+- **Seguridad:**
+  - Host permitido: solo `127.0.0.1:PUERTO` y `localhost:PUERTO` (anti DNS rebinding).
+  - Todo lo que no sea GET/HEAD recibe 405, salvo la única ruta POST. Sin CORS.
+  - CSP estricta: `script-src 'self'` y `style-src 'self'`, sin estilos ni scripts
+    en línea; `frame-ancestors 'none'`.
+  - Token de 32 bytes por ejecución, solo dentro del HTML. `instanceId` público en
+    `/api/meta` y en el saludo SSE: si cambia, la página pide recargar.
+- **Config del panel:** lee el `.env` con `dotenv.parse` y una lista blanca
+  (`PANEL_ENV_KEYS`), validada con `publicEnvShape` del bot. Un valor inválido usa el
+  defecto y avisa. `PANEL_PORT` lo valida el panel, no el esquema del bot.
+- **Datos que no se recalculan aparte:**
+  - el PnL con `RiskManager.dailyPnl()`;
+  - las medias del gráfico con `strategy.evaluate()` sobre la misma ventana que el bot;
+  - comprar y mantener con `buyAndHold()` vela a vela.
+- **Interfaz:**
+  - React + Vite compilada y servida SIEMPRE por el servidor del panel. No se usa el
+    servidor de desarrollo de Vite: obligaba a relajar la CSP y exponía `/@fs/`.
+  - `panel:dev` recompila al guardar.
+- **lightweight-charts (Apache 2.0):**
+  - Su logo inserta un `<style>` que la CSP bloquea. Por eso está desactivado y hay
+    un enlace propio a tradingview.com bajo cada gráfico, más el aviso del NOTICE en
+    `CandleChart.jsx` y en el README; una prueba lo exige.
+  - La rueda del mouse no hace zoom: desplaza la página.
+- **Logs:** las líneas del bot, `resume` y `reconcile` llevan `"scope":"env/mode"`.
+  Se llama `scope` porque el heartbeat ya registra `env` y `mode`, y pino
+  duplicaría las claves. El navegador filtra las líneas en vivo con la misma regla
+  que el servidor; una prueba compara los dos filtros.
 
 ## Convenciones
 
@@ -181,6 +249,12 @@ Flujo: **datos → (cola del bot) → estrategia → riesgo → ejecución → a
 - **Errores de rechazo esperado** (`SafetyError`, `PreflightError`, `StrategyError`,
   `RiskError`, `ConfigError`) se muestran sin stack trace. Los inesperados, completos.
 - **Pruebas de backtest:** con resultados calculados a mano y los cálculos en comentarios.
+- **Interfaz del panel:**
+  - La lógica va en `panel/web/src/lib/` como funciones puras con pruebas; los
+    componentes solo la muestran.
+  - Colores como variables CSS (tema claro/oscuro) y nada cargado de otros sitios.
+  - Todo texto en español.
+  - Fechas `AAAA-MM-DD HH:MM:SS` (24 h) y números con la configuración regional del navegador.
 
 ## Entorno de desarrollo
 
