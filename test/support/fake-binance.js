@@ -39,6 +39,9 @@ export class FakeBinance {
     this.fillRatio = 1;
     this.restNextOrder = false;
     this.onCreate = null; // hook: se llama justo antes de procesar un POST /order
+    // Velas: precio de cierre para la vela que empieza en t (ms). Por defecto, precio fijo.
+    this.closeAt = () => this.price;
+    this.historyStart = 0; // no hay velas antes de este instante (simula poco historial)
     this.fetch = this.fetch.bind(this);
   }
 
@@ -88,6 +91,14 @@ export class FakeBinance {
       });
     }
     if (method === 'GET' && pathname === '/api/v3/time') return json({ serverTime: Date.now() });
+    if (method === 'GET' && pathname === '/api/v3/exchangeInfo') {
+      return json({
+        timezone: 'UTC', serverTime: Date.now(), exchangeFilters: [], symbols: [MARKET.info],
+        rateLimits: [{ rateLimitType: 'REQUEST_WEIGHT', interval: 'MINUTE', intervalNum: 1, limit: 6000 }],
+      });
+    }
+    if (method === 'GET' && pathname === '/api/v3/ticker/24hr') return json(this.#ticker());
+    if (method === 'GET' && pathname === '/api/v3/klines') return json(this.#klines(params));
     throw new Error(`FakeBinance: endpoint no simulado ${method} ${pathname}`);
   }
 
@@ -142,6 +153,30 @@ export class FakeBinance {
     const sign = order.side === 'BUY' ? 1 : -1;
     this.balances.BTC += sign * qty - (commissionAsset === 'BTC' ? commission : 0);
     this.balances.USDT += -sign * quote - (commissionAsset === 'USDT' ? commission : 0);
+  }
+
+  /** Velas de 1m con el formato de Binance; incluye la vela en curso, como la API real. */
+  #klines(params) {
+    const step = 60_000;
+    const limit = Number(params.get('limit') ?? 500);
+    const end = Math.min(Number(params.get('endTime') ?? Infinity), Date.now());
+    const rows = [];
+    let t = Math.max(Math.ceil(Number(params.get('startTime') ?? 0) / step) * step, this.historyStart);
+    for (; t <= end && rows.length < limit; t += step) {
+      const c = this.closeAt(t);
+      rows.push([t, fmt(c), fmt(c * 1.001), fmt(c * 0.999), fmt(c), '1.00000000', t + step - 1, fmt(c), 10, '0.5', fmt(c / 2), '0']);
+    }
+    return rows;
+  }
+
+  #ticker() {
+    const p = fmt(this.price);
+    return {
+      symbol: 'BTCUSDT', priceChange: '0', priceChangePercent: '0', weightedAvgPrice: p, prevClosePrice: p,
+      lastPrice: p, lastQty: '0.001', bidPrice: p, bidQty: '1', askPrice: p, askQty: '1', openPrice: p,
+      highPrice: p, lowPrice: p, volume: '100', quoteVolume: '8400000', openTime: Date.now() - 86_400_000,
+      closeTime: Date.now(), firstId: 1, lastId: 100, count: 100,
+    };
   }
 
   #orderJson(o) {

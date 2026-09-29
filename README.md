@@ -292,3 +292,49 @@ Una orden de mercado puede ejecutarse solo en parte (queda `expired`). La posici
 registra la cantidad ejecutada, descontando la comisión si se cobró en la moneda
 base. En una venta parcial, la parte vendida queda como operación cerrada y la
 posición sigue abierta con lo que queda.
+
+## Ciclo del bot
+
+`npm start` ejecuta [src/index.js](src/index.js) → [src/app.js](src/app.js) (arranque) →
+[src/bot.js](src/bot.js) (ciclo y apagado).
+
+### Arranque, en este orden
+
+| Paso | Qué verifica | Si falla |
+|---|---|---|
+| 1. Configuración y entorno | config válida, advertencia si no es dry-run, estrategia, guardia de red (bloqueo de mainnet), conexión, mercado y credenciales | no arranca |
+| 2. Hora | sincroniza con el servidor de Binance | no arranca |
+| 3. Estado de riesgo | parada guardada, kill switch, posiciones y PnL del día desde SQLite | no arranca |
+| 4. Reconciliación | órdenes y saldos contra Binance; límites de riesgo | no arranca |
+| 5. Velas históricas | suficientes para calentar los indicadores | no arranca |
+
+Si un paso falla, el bot cierra lo que alcanzó a abrir y explica el paso y el motivo.
+
+### Una vela a la vez
+
+Cada vela cerrada pasa por: límites de riesgo → estrategia → orden (si hay
+señal) → límites otra vez. Las velas se procesan **de a una y en orden**: si llega
+una mientras otra se procesa, espera en la cola. Una señal de una vela que cerró
+hace más de `DATA_STALE_AFTER_SECONDS` (por ejemplo, rellenada tras un corte) no se
+opera. Si procesar velas falla 3 veces seguidas, el bot se apaga de forma segura.
+
+### Apagado ordenado
+
+Con **Ctrl+C** (SIGINT) o **SIGTERM**, y también ante una excepción no controlada o
+una promesa rechazada sin manejar:
+
+1. Deja de aceptar velas y señales nuevas (las que estaban en cola se descartan).
+2. Espera a que termine la operación en curso, como máximo `SHUTDOWN_TIMEOUT_SECONDS`.
+3. Cancela las órdenes pendientes no ejecutadas.
+4. Guarda el estado y el motivo en SQLite (evento `SHUTDOWN`).
+5. Cierra el WebSocket, los timers, el cliente y la base de datos.
+
+**Las posiciones abiertas NO se cierran ni se venden** al apagar: vender es una
+decisión de trading, y apagar el bot no debe tomar decisiones de trading. Un
+**segundo Ctrl+C** fuerza la salida inmediata (queda registrado como advertencia).
+El kill switch y la pérdida máxima diaria también terminan en este apagado.
+
+### Heartbeat
+
+Cada `HEARTBEAT_SECONDS` se registra el estado: entorno y modo, estrategia,
+última vela procesada, precio, posiciones abiertas, PnL del día y estado de los datos.

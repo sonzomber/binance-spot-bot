@@ -57,19 +57,36 @@ export class CandleFeed extends EventEmitter {
     this.running = false;
   }
 
-  /** Carga el historial inicial (caché + REST) y arranca la fuente de datos. */
+  /** Carga el historial y arranca la fuente de datos. */
   async start() {
+    await this.loadHistory();
+    this.startStreaming();
+  }
+
+  /**
+   * Carga las últimas warmupCandles velas cerradas (caché + REST) para calentar
+   * los indicadores. No arranca la fuente en vivo.
+   * @returns {Promise<{ added: number, available: number, latest: object | undefined }>}
+   */
+  async loadHistory() {
     this.running = true;
     this.health.setRecovering('cargando el historial de velas');
     try {
       const result = await this.#backfill();
+      const available = this.getCandles(this.warmupCandles).length;
       this.logger?.info(
         { added: result.added, latest: result.latest && new Date(result.latest.time).toISOString() },
-        `Historial listo: ${this.warmupCandles} velas ${this.symbol} ${this.timeframe} (${result.added} descargadas, el resto del caché)`,
+        `Historial: ${available} velas ${this.symbol} ${this.timeframe} (${result.added} descargadas, el resto del caché)`,
       );
+      return { ...result, available };
     } finally {
       this.health.setRecovering(null);
     }
+  }
+
+  /** Arranca la fuente en vivo (WebSocket o consultas REST). */
+  startStreaming() {
+    this.running = true;
     if (this.mode === 'ws') this.#startStream();
     else this.#startPolling();
   }
@@ -250,7 +267,7 @@ export class CandleFeed extends EventEmitter {
  * Arma el feed con las piezas reales: caché SQLite del entorno, descarga REST
  * con el cliente protegido, y stream WebSocket del mismo entorno.
  */
-export function createCandleFeed({ config, exchange, market, db, health, now, logger, warmupCandles }) {
+export function createCandleFeed({ config, exchange, market, db, health, now, logger, warmupCandles, createSocket }) {
   const { symbol, timeframe } = config;
   const url = klineStreamUrl(exchange.urls.api.ws.spot, market.id, timeframe);
   return new CandleFeed({
@@ -263,7 +280,7 @@ export function createCandleFeed({ config, exchange, market, db, health, now, lo
     now,
     logger,
     warmupCandles,
-    createStream: () => new KlineStream({ url, env: config.env, logger, now }),
+    createStream: () => new KlineStream({ url, env: config.env, logger, now, ...(createSocket ? { createSocket } : {}) }),
     fetchPrice: async () => (await exchange.fetchTicker(symbol)).last,
   });
 }

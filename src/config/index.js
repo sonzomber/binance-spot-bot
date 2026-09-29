@@ -135,6 +135,11 @@ const envShape = z.object({
     n.min(0, 'no puede ser negativo').max(500, 'parece demasiado alto (máx. 500 bps = 5%)'),
   ),
 
+  // Apagado ordenado: tiempo máximo para que termine la operación en curso.
+  SHUTDOWN_TIMEOUT_SECONDS: numberVar(30, (n) => n.min(1, 'debe ser ≥ 1').max(600, 'debe ser ≤ 600')),
+  // Cada cuánto se registra el estado del bot (heartbeat).
+  HEARTBEAT_SECONDS: numberVar(60, (n) => n.min(5, 'debe ser ≥ 5').max(3600, 'debe ser ≤ 3600')),
+
   LOG_LEVEL: envValue(
     z.preprocess(normalized, z.enum(LOG_LEVELS, { error: `debe ser uno de: ${LOG_LEVELS.join(', ')}` })).default('info'),
   ),
@@ -216,6 +221,7 @@ export function loadConfig(env = process.env) {
       killSwitchFile: fromRoot(e.KILL_SWITCH_FILE),
     },
     execution: { feeRate: e.FEE_RATE, slippageBps: e.SLIPPAGE_BPS },
+    lifecycle: { shutdownTimeoutMs: e.SHUTDOWN_TIMEOUT_SECONDS * 1000, heartbeatMs: e.HEARTBEAT_SECONDS * 1000 },
     log: { level: e.LOG_LEVEL, file: fromRoot(e.LOG_FILE) },
     storage: { dbPath: fromRoot(e.DB_PATH) },
   });
