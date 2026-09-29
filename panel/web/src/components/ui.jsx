@@ -77,3 +77,41 @@ export function Loading({ label = 'Cargando…' }) {
 
 /** Texto de código o comando (p. ej. npm run resume). */
 export const Cmd = ({ children }) => <code className="cmd">{children}</code>;
+
+/** Barra de progreso accesible (0–100). */
+export function ProgressBar({ value, tone = 'ok', label }) {
+  const pct = Math.min(100, Math.max(0, value ?? 0));
+  return (
+    <div className={`progress progress-${tone}`} role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)} aria-label={label}>
+      <div className="progress-fill" style={{ width: `${pct}%` }} />
+    </div>
+  );
+}
+
+/** Lista de datos: [{ label, value, hint? }] en dos columnas. */
+export function KeyValue({ items }) {
+  return (
+    <dl className="kv">
+      {items.filter(Boolean).map((item) => (
+        <div className="kv-row" key={item.label}>
+          <dt>{item.label}</dt>
+          <dd>
+            {item.value}
+            {item.hint ? <span className="kv-hint">{item.hint}</span> : null}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+/** Cifra destacada con su etiqueta. */
+export function Stat({ label, value, tone = 'neutral', hint }) {
+  return (
+    <div className="stat">
+      <span className="stat-label">{label}</span>
+      <span className={`stat-value tone-${tone}`}>{value}</span>
+      {hint ? <span className="stat-hint">{hint}</span> : null}
+    </div>
+  );
+}
