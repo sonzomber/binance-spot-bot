@@ -1,344 +1,379 @@
-# Binance Spot Bot (testnet)
+# Binance Spot Bot
 
-Bot de trading educativo para **Binance Spot**, escrito en Node.js (ES modules).
-Funciona **solo** contra entornos sin dinero real — [Spot Testnet](https://testnet.binance.vision)
-o [Demo Mode](https://demo.binance.com) — y se niega a arrancar con cualquier otra configuración.
+Bot de trading para **Binance Spot** escrito en Node.js (ES modules): datos de
+mercado en vivo, una estrategia intercambiable, gestión de riesgo obligatoria,
+ejecución idempotente de órdenes, registro en SQLite y backtesting sin sesgo de futuro.
 
-> ⚠️ Proyecto de aprendizaje y portafolio. No es asesoría financiera ni está pensado para operar dinero real.
+> [!WARNING]
+> **Proyecto de aprendizaje y portafolio. No es asesoría financiera.**
+> Por defecto **solo opera en entornos sin dinero real** (Spot Testnet o Demo Mode
+> de Binance) y arranca en **dry-run** (órdenes simuladas). El código se niega a
+> conectarse a Binance producción para operar: no existe ninguna opción de
+> configuración para hacerlo. La estrategia incluida (cruce de medias) es un
+> ejemplo didáctico: en el backtest de ejemplo **pierde dinero**.
 
-> 🚧 En construcción. Este README se completa en el último módulo (instalación, API keys, backtest).
+## Contenido
 
-## Comandos
+- [Qué hace](#qué-hace)
+- [Arquitectura](#arquitectura)
+- [Requisitos e instalación](#requisitos-e-instalación)
+- [API keys (Spot Testnet y Demo) y seguridad](#api-keys-spot-testnet-y-demo-y-seguridad)
+- [Configuración](#configuración)
+- [Modos: dry-run, testnet y demo](#modos-dry-run-testnet-y-demo)
+- [Correr el bot](#correr-el-bot)
+- [Gestión de riesgo](#gestión-de-riesgo)
+- [Backtest](#backtest)
+- [Pruebas](#pruebas)
+- [Problemas comunes](#problemas-comunes)
+- [Estructura de carpetas](#estructura-de-carpetas)
+- [Decisiones técnicas](#decisiones-técnicas)
 
-| Comando | Qué hace |
+## Qué hace
+
+- Recibe velas por **REST o WebSocket** y entrega a la estrategia **solo velas
+  cerradas**, continuas y sin duplicados. Si se corta la conexión, rellena lo perdido.
+- Evalúa una **estrategia intercambiable**. La incluida es un cruce de medias
+  móviles simples (SMA) con parámetros configurables.
+- Cada orden pasa **obligatoriamente** por el **gestor de riesgo**: tope por
+  operación, máximo de posiciones, filtros del par, pérdida diaria, kill switch,
+  datos desactualizados y reconciliación.
+- **Ejecuta** en dry-run (simulado, con comisión y slippage) o en testnet/demo, de
+  forma idempotente: nunca reenvía una orden a ciegas.
+- **Registra** todo en SQLite (órdenes, ejecuciones, posiciones, eventos,
+  velas), separado por entorno, con migraciones versionadas.
+- **Backtest** con velas históricas de producción (solo lectura), con los mismos
+  módulos que el bot en vivo, período de ajuste y de validación, y resultados
+  guardados en SQLite y CSV.
+
+## Arquitectura
+
+```mermaid
+flowchart LR
+    subgraph BX["Binance Spot Testnet / Demo"]
+        REST[("REST")]
+        WS[("WebSocket de velas")]
+    end
+
+    subgraph DATA["src/data · Datos"]
+        FEED["CandleFeed<br/>solo velas cerradas"]
+        HEALTH["DataHealth<br/>¿datos al día?"]
+    end
+
+    BOT["src/bot.js<br/>cola: una vela a la vez"]
+    STRAT["src/strategy<br/>evaluate() → BUY / SELL / HOLD"]
+    RISK["src/risk<br/>checkOrder() → aprobación"]
+    EXEC["src/execution<br/>OrderExecutor"]
+    GATE["filtro de órdenes<br/>(guardia de red)"]
+    DB[("src/storage<br/>SQLite")]
+
+    WS --> FEED
+    REST --> FEED
+    FEED -- "vela cerrada" --> BOT
+    BOT --> STRAT
+    STRAT -- "señal" --> EXEC
+    EXEC -- "¿se puede?" --> RISK
+    RISK -- "aprobación de un solo uso" --> EXEC
+    EXEC -- "orden + aprobación" --> GATE
+    GATE --> REST
+    HEALTH -. "bloquea si están viejos" .-> RISK
+    FEED --> DB
+    RISK --> DB
+    EXEC --> DB
+```
+
+**El flujo, paso a paso:**
+
+1. **Datos** ([src/data](src/data)). `CandleFeed` recibe velas del exchange y las
+   guarda en el caché. Solo emite una vela cuando está **cerrada**. `DataHealth`
+   vigila que los datos estén al día; `TimeSync` mantiene la hora del servidor; y
+   `WeightLimiter` respeta los límites de peticiones (429/418).
+2. **Ciclo** ([src/bot.js](src/bot.js)). Cada vela cerrada entra a una **cola** y se
+   procesa **de a una**: límites de riesgo → estrategia → orden → límites otra vez.
+3. **Estrategia** ([src/strategy](src/strategy)). Recibe las últimas velas cerradas y
+   devuelve una señal. No sabe nada de dinero ni de órdenes; por eso el mismo
+   código sirve en vivo y en el backtest.
+4. **Riesgo** ([src/risk](src/risk)). Decide si la orden se puede enviar. Si la
+   aprueba, emite una **aprobación infalsificable y de un solo uso**, atada a esa
+   orden exacta.
+5. **Ejecución** ([src/execution](src/execution)). Guarda la orden como `pending`
+   **antes** de enviarla y la envía con la aprobación. Un **filtro de red** en el
+   cliente bloquea cualquier orden sin aprobación. Después registra las
+   ejecuciones y actualiza la posición.
+6. **Almacenamiento** ([src/storage](src/storage)). SQLite con migraciones
+   versionadas. Cada registro indica su entorno (`testnet`, `demo`,
+   `production-readonly`) y su modo (`dry-run`, `exchange`). Los entornos nunca
+   se mezclan en consultas ni reportes.
+
+**El backtest** reutiliza la misma estrategia, el mismo riesgo y el mismo ejecutor,
+sobre datos históricos:
+
+```mermaid
+flowchart LR
+    API[("data-api.binance.vision<br/>solo lectura")] --> CACHE[("caché de velas<br/>production-readonly")]
+    CACHE --> ENGINE["src/backtest/engine.js<br/>reloj simulado"]
+    ENGINE --> S2["misma estrategia"] --> E2["mismo riesgo y ejecutor<br/>(ejecución simulada)"]
+    E2 --> REPORT["reporte + SQLite + CSV"]
+```
+
+## Requisitos e instalación
+
+- **Node.js 22.12 o superior** (probado con Node 24). Recomendado: la versión LTS actual.
+- **npm** (viene con Node).
+- **git** (opcional, para clonar).
+- Sin API keys puedes correr el bot en dry-run, el monitor de datos y el backtest.
+
+```bash
+git clone <url-del-repositorio> binance-spot-bot
+cd binance-spot-bot
+npm install
+cp .env.example .env      # en PowerShell también funciona "cp"
+npm test                  # verifica que todo funcione
+npm start                 # arranca en dry-run contra el Spot Testnet
+```
+
+No hacen falta herramientas de compilación: `better-sqlite3` trae binarios
+precompilados para Windows, macOS y Linux. El archivo [.npmrc](.npmrc) del proyecto
+(`ignore-scripts=true`) evita que npm intente compilarlo igual y, de paso, que
+alguna dependencia ejecute código al instalarse. Si la instalación fallara,
+revisa [Problemas comunes](#problemas-comunes).
+
+## API keys (Spot Testnet y Demo) y seguridad
+
+Solo hacen falta para **enviar órdenes** al testnet o al demo (`DRY_RUN=false`).
+**Las keys de un entorno no sirven en otro**: las del testnet no funcionan en demo,
+y ninguna de las dos sirve en Binance real (ni al revés).
+
+### Spot Testnet (`BINANCE_ENV=testnet`)
+
+No requiere cuenta de Binance.
+
+1. Entra a <https://testnet.binance.vision> y elige **Log In with GitHub**.
+2. Genera una key **HMAC-SHA-256**. Es la más simple: Binance te entrega la API key
+   y el secret. El testnet también acepta RSA y Ed25519, pero este bot espera un
+   secret de una sola línea.
+3. Copia la **API key** y el **secret** a tu `.env`. Guarda el secret en ese momento:
+   después no se vuelve a mostrar.
+
+El testnet regala saldos de varias monedas y **se reinicia aproximadamente una vez
+al mes**: se borran los saldos y las órdenes. Después de un reinicio, la
+reconciliación del bot detectará la diferencia (ver [Problemas comunes](#problemas-comunes)).
+Sus precios son **independientes del mercado real** y tiene poca liquidez.
+
+### Demo Mode (`BINANCE_ENV=demo`)
+
+Requiere una cuenta de Binance, pero no la verificación de identidad (KYC).
+
+1. Inicia sesión en Binance y entra a **Demo Trading** (<https://demo.binance.com>).
+2. Arriba a la derecha, icono de cuenta → **API Management** → **Create API**, y
+   ponle un nombre.
+3. Configura los permisos (ver abajo) y copia la API key y el secret a tu `.env`.
+
+Sus precios y su libro de órdenes son **parecidos al mercado real**. Los saldos
+virtuales se reinician a mano desde la interfaz.
+
+### Recomendaciones de seguridad
+
+- **Las keys van solo en `.env`.** Nunca en el código, en issues ni en capturas de pantalla.
+- **Nunca subas `.env` a git.** Ya está en `.gitignore`: antes de cada commit revisa
+  `git status` y confirma que no aparezca.
+- **Sin permiso de retiro.** Activa solo lectura y trading Spot. Este bot nunca
+  necesita retirar fondos.
+- **Restringe por IP** si el entorno lo permite: solo tu IP podrá usar la key.
+- **Una key por uso** (bot, pruebas manuales…). Si se filtra, revócala y crea otra.
+- El bot **nunca muestra los secretos** en los logs: aparecen como `[REDACTED]`, y al
+  arrancar solo informa si hay credenciales configuradas.
+
+## Configuración
+
+Todo se configura en `.env` (plantilla: [.env.example](.env.example)). Los
+valores se validan al arrancar: si alguno es inválido, el bot no arranca y lista
+todos los problemas juntos. Una línea vacía (`CLAVE=`) usa el valor por defecto.
+
+| Variable | Descripción | Por defecto | Ejemplo |
+|---|---|---|---|
+| `BINANCE_ENV` | Entorno: `testnet` o `demo`. **No existe opción para producción.** | `testnet` | `demo` |
+| `BINANCE_API_KEY` | API key del entorno elegido. Obligatoria si `DRY_RUN=false`. | — | `tu-api-key` |
+| `BINANCE_API_SECRET` | Secret de esa key. Obligatorio si `DRY_RUN=false`. | — | `tu-secret` |
+| `DRY_RUN` | `true`: órdenes simuladas. `false`: se envían al entorno. Hay que escribir exactamente `true` o `false`. | `true` | `false` |
+| `SYMBOL` | Par a operar, formato `BASE/USDT`. | `BTC/USDT` | `ETH/USDT` |
+| `TIMEFRAME` | Intervalo de las velas: `1m 3m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d`. | `15m` | `1h` |
+| `DATA_FEED` | Fuente de velas: `rest` (consultas periódicas) o `ws` (WebSocket). | `rest` | `ws` |
+| `DATA_STALE_AFTER_SECONDS` | Segundos sin datos (o sin la última vela cerrada) para considerarlos desactualizados y bloquear órdenes. Entre 5 y 3600. | `60` | `120` |
+| `STRATEGY` | Estrategia activa. **Obligatoria.** | — | `sma-cross` |
+| `STRATEGY_PARAMS` | Parámetros de la estrategia, en JSON de una línea. Los que no pongas usan su valor por defecto. | `{}` (sma-cross: 9/21) | `{"fast":9,"slow":21}` |
+| `MAX_TRADE_USDT` | Monto máximo por compra, en USDT (incluye comisión y slippage estimados). | `50` | `25` |
+| `MAX_DAILY_LOSS_USDT` | Pérdida máxima del día UTC, neta de comisiones. Al alcanzarla, el bot se detiene. | `20` | `10` |
+| `MAX_OPEN_POSITIONS` | Máximo de posiciones abiertas a la vez (entero ≥ 1). | `1` | `2` |
+| `KILL_SWITCH_FILE` | Archivo cuya existencia detiene el bot. | `./STOP` | `./PARAR` |
+| `FEE_RATE` | Comisión por operación (dry-run y backtest). Entre 0 y 0.01. | `0.001` (0.1%) | `0.00075` |
+| `SLIPPAGE_BPS` | Slippage estimado en puntos básicos (dry-run y backtest). Entre 0 y 500. | `5` (0.05%) | `10` |
+| `BACKTEST_CAPITAL` | Capital inicial del backtest, en USDT. | `20` | `100` |
+| `SHUTDOWN_TIMEOUT_SECONDS` | Al apagar, espera máxima a la operación en curso. Entre 1 y 600. | `30` | `60` |
+| `HEARTBEAT_SECONDS` | Cada cuánto se registra el estado del bot. Entre 5 y 3600. | `60` | `300` |
+| `LOG_LEVEL` | Nivel de log: `trace debug info warn error fatal silent`. | `info` | `debug` |
+| `LOG_FILE` | Archivo de log (JSON, una línea por evento). | `./data/logs/bot.log` | `./logs/bot.log` |
+| `DB_PATH` | Base de datos SQLite. | `./data/bot.db` | `./data/testnet.db` |
+
+Las rutas relativas se resuelven desde la carpeta del proyecto.
+
+## Modos: dry-run, testnet y demo
+
+| Modo | `DRY_RUN` | `BINANCE_ENV` | Órdenes | Precios | API keys |
+|---|---|---|---|---|---|
+| **dry-run** (por defecto) | `true` | `testnet` o `demo` | **simuladas**: nada sale al exchange | del entorno elegido | opcionales |
+| **testnet** | `false` | `testnet` | reales en testnet.binance.vision, con fondos ficticios | del testnet (independientes del mercado real) | del testnet |
+| **demo** | `false` | `demo` | reales en demo.binance.com, con fondos ficticios | parecidos al mercado real | del demo |
+
+- **Dry-run** usa exactamente el mismo flujo que las órdenes reales: riesgo,
+  registro, comisión y slippage simulados. Sus registros quedan con modo `dry-run`
+  y su `clientOrderId` empieza con `sbtp-`. Para simular con precios más realistas,
+  usa `BINANCE_ENV=demo` con `DRY_RUN=true`.
+- **Para enviar órdenes** hay que escribir exactamente `DRY_RUN=false`. Valores como
+  `0`, `no` u `off` son un error y el bot no arranca. Al arrancar se muestra una
+  advertencia destacada y hay 5 segundos para cancelar con Ctrl+C.
+- Lo simulado y lo enviado se guardan por separado: nunca se mezclan en el riesgo,
+  en los reportes ni en la reconciliación.
+
+## Correr el bot
+
+```bash
+npm start
+```
+
+**Arranque, en este orden.** Si un paso falla, el bot no arranca y explica el paso y el motivo.
+
+| Paso | Qué hace |
 |---|---|
-| `npm start` | Arranca el bot (dry-run por defecto) |
-| `npm run kill -- "motivo"` | Kill switch: detiene el bot de forma segura |
-| `npm run resume` | Reanuda después de una parada (acción manual obligatoria) |
-| `npm run status` | Muestra el estado de riesgo: parada, PnL del día, posiciones |
-| `npm run feed` | Monitor de datos de mercado (solo lectura): velas cerradas, precio, estado |
-| `npm run reconcile` | Compara órdenes y saldos con Binance y ayuda a resolver diferencias |
-| `npm run backtest -- --from AAAA-MM-DD --to AAAA-MM-DD` | Backtest con velas históricas de producción (solo lectura) |
-| `npm test` | Ejecuta las pruebas |
+| 1. Configuración y entorno | Valida el `.env`, carga la estrategia y crea el cliente con la guardia de red (bloqueo de mainnet). Verifica la conexión, que el par exista y que las keys sean del entorno. |
+| 2. Hora | Sincroniza con el servidor de Binance (se repite cada 30 min). |
+| 3. Estado de riesgo | Lee de SQLite la parada guardada, el kill switch, las posiciones y el PnL del día. Verifica que `MAX_TRADE_USDT` alcance para una orden válida. |
+| 4. Reconciliación | Compara órdenes y saldos con Binance y revisa los límites de riesgo. |
+| 5. Velas históricas | Carga las suficientes para calentar los indicadores. |
+
+Después, el bot procesa cada vela cerrada: límites → estrategia → orden → límites.
+Una señal de una vela que cerró hace más de `DATA_STALE_AFTER_SECONDS` no se
+opera (por ejemplo, una rellenada tras un corte).
+
+**Heartbeat.** Cada `HEARTBEAT_SECONDS` registra el entorno y el modo, la
+estrategia, la última vela procesada, el precio, las posiciones, el PnL del día y el
+estado de los datos:
+
+```
+Estado: testnet/dry-run · sma-cross · 0 posición(es) · PnL del día 0 USDT
+```
+
+**Apagado ordenado con Ctrl+C** (también SIGTERM, una excepción no controlada o una
+promesa rechazada sin manejar):
+
+1. Deja de aceptar velas y señales.
+2. Espera la operación en curso, como máximo `SHUTDOWN_TIMEOUT_SECONDS`.
+3. Cancela las órdenes pendientes no ejecutadas.
+4. Guarda el estado y el motivo.
+5. Cierra el WebSocket y la base de datos.
+
+**Las posiciones abiertas no se cierran ni se venden**: apagar el bot no toma
+decisiones de trading. Un segundo Ctrl+C fuerza la salida.
+
+**Otros comandos útiles**
+
+```bash
+npm run feed         # monitor de datos en vivo (solo lectura, sin órdenes)
+npm run status       # estado de riesgo, posiciones, órdenes de hoy y eventos
+npm run reconcile    # compara con Binance y ayuda a resolver diferencias
+```
+
+Con `TIMEFRAME=1m npm run feed` ves cerrarse una vela por minuto. Los logs
+también se guardan en `data/logs/bot.log`, en formato JSON.
 
 ## Gestión de riesgo
 
-Toda orden pasa por el gestor de riesgo **antes** de enviarse. Si alguna regla
-no se cumple, la orden se rechaza con un código y un motivo en el log.
-
-### Límites que se validan antes de cada orden
+Toda orden, en dry-run o real, pasa por el gestor de riesgo
+([src/risk/risk-manager.js](src/risk/risk-manager.js)). Si una regla no se cumple,
+la orden se **registra como rechazada** con su código y motivo, y no sale.
 
 | Regla | Configuración | Aplica a |
 |---|---|---|
 | Bot detenido o kill switch activo | — | compras y ventas |
-| Reconciliación con el exchange pendiente o con diferencias | — | compras y ventas |
+| Reconciliación pendiente o con diferencias | — | compras y ventas |
+| Datos de mercado desactualizados | `DATA_STALE_AFTER_SECONDS` | compras y ventas |
 | Señal que ya generó una orden, u otra orden del par sin terminar | — | compras y ventas |
-| Datos de mercado desactualizados | `DATA_STALE_AFTER_SECONDS` (60) | compras y ventas |
-| Pérdida máxima diaria | `MAX_DAILY_LOSS_USDT` (20) | compras y ventas |
-| Monto máximo por operación | `MAX_TRADE_USDT` (50) | compras |
-| Máximo de posiciones abiertas | `MAX_OPEN_POSITIONS` (1) | compras |
+| Pérdida máxima diaria alcanzada | `MAX_DAILY_LOSS_USDT` | compras y ventas |
+| Monto máximo por operación (con slippage y comisión) | `MAX_TRADE_USDT` | compras |
+| Máximo de posiciones abiertas | `MAX_OPEN_POSITIONS` | compras |
 | Solo vender lo que se tiene (Spot) | — | ventas |
-| Filtros del par en Binance | los lee del exchange | compras y ventas |
+| Filtros del par: paso de cantidad, tick de precio, mínimos, valor mínimo (5 USDT en BTC/USDT) | los lee del exchange | compras y ventas |
 
-- **Monto máximo por operación:** el costo *estimado* de la compra, incluyendo
-  slippage (`SLIPPAGE_BPS`) y comisión (`FEE_RATE`), no puede superar
-  `MAX_TRADE_USDT`. Las ventas no se limitan: cerrar una posición reduce el riesgo.
-- **Filtros del par:** cantidad múltiplo del paso (`LOT_SIZE`, p. ej. 0.00001 BTC),
-  precio múltiplo del tick (`PRICE_FILTER`, p. ej. 0.01 USDT), cantidades mín./máx.
-  (incluido `MARKET_LOT_SIZE` para órdenes de mercado) y valor mínimo de la orden
-  (`NOTIONAL`, p. ej. 5 USDT). Al arrancar, el bot verifica que `MAX_TRADE_USDT`
-  alcance para una orden válida.
+**Nadie se salta el riesgo.**
+- La aprobación del riesgo es un objeto que solo `checkOrder()` puede crear.
+  Vale para **una** orden exacta, **una** vez y durante 30 s.
+- El cliente ccxt tiene un **filtro de red**: toda petición que crea órdenes debe
+  llevar un `clientOrderId` autorizado con esa aprobación.
+- La WebSocket API, que es otro canal para crear órdenes, está bloqueada.
 
-### Pérdida máxima diaria
+### Pérdida máxima diaria (día UTC)
 
-**El "día" es el día UTC:** va de las **00:00:00.000 a las 23:59:59.999 UTC**, sin
-importar la zona horaria de tu computador. Por ejemplo, en UTC−3 el día del bot
-empieza a las 21:00 hora local. Se eligió UTC porque es la hora de Binance y no
-cambia con el horario de verano.
-
-La pérdida del día se calcula **neta y con comisiones**:
+**El "día" es el día UTC:** de **00:00:00 a 23:59:59.999 UTC**, sin importar la zona
+horaria de tu PC. Por ejemplo, en UTC−3 el día del bot empieza a las 21:00 hora
+local. Se usa UTC porque es la hora de Binance y no cambia con el horario de verano.
 
 ```
-PnL del día = PnL realizado  (operaciones cerradas hoy UTC, comisión de compra y de venta incluidas)
-            + PnL no realizado (posiciones abiertas a precio de mercado, menos la comisión estimada de venta)
+PnL del día = realizado (operaciones cerradas hoy, con comisiones de compra y venta)
+            + no realizado (posiciones abiertas a precio de mercado, menos la comisión estimada de venta)
 ```
 
-- Las ganancias del día compensan las pérdidas.
-- Una posición abierta cuenta desde su precio de entrada, aunque se haya abierto
-  el día anterior (es conservador).
-- Si al vender queda un residuo que no se puede vender por el paso del par
-  ("dust"), su costo se cuenta como pérdida (también conservador).
-- Si `PnL del día ≤ −MAX_DAILY_LOSS_USDT`, el bot ejecuta la **parada de emergencia**.
+- Las ganancias del día compensan las pérdidas: se mide el **neto**.
+- Una posición abierta cuenta desde su precio de entrada, aunque se haya abierto el
+  día anterior (es conservador).
+- Si `PnL del día ≤ −MAX_DAILY_LOSS_USDT`, se ejecuta la **parada de emergencia**:
+  1. guarda la parada en SQLite;
+  2. bloquea las órdenes nuevas;
+  3. cancela las pendientes;
+  4. registra el motivo;
+  5. detiene el bot.
+- **El estado vive en SQLite:** reiniciar el bot **no** resetea la pérdida del día
+  ni la parada.
 
-### Kill switch
+> [!IMPORTANT]
+> **Comportamiento actual, a revisar.** Durante una parada no se envía **ninguna**
+> orden, tampoco ventas. Si una posición abierta sigue perdiendo, al reanudar al día
+> siguiente puede volver a alcanzar el límite (lo no realizado cuenta desde la
+> entrada) y quedar atrapada. El backtest lo reproduce. Hay dos alternativas en
+> evaluación:
+> - permitir durante la parada solo las ventas que reducen una posición;
+> - medir la pérdida desde el capital al inicio del día UTC.
 
-`npm run kill -- "motivo"` crea el archivo `STOP` (configurable con `KILL_SWITCH_FILE`)
-y registra la parada en la base de datos para **todos** los entornos y modos.
-También sirve crear el archivo a mano. El bot lo revisa cada segundo.
-`npm run kill` funciona aunque la configuración tenga errores: es una
-herramienta de emergencia.
-
-### Parada de emergencia
-
-Se activa por el kill switch o por la pérdida máxima diaria, en este orden:
-
-1. **Guarda la parada en SQLite** antes que nada: si algo falla después (o el
-   proceso muere), al reiniciar el bot sigue detenido.
-2. **Bloquea órdenes nuevas** (compras y ventas).
-3. **Cancela las órdenes abiertas pendientes.** Si no puede, lo registra para que
-   las revises manualmente.
-4. **Registra el motivo** en el log (nivel `error`) y en la bitácora de eventos.
-5. **Detiene el bot.**
-
-La posición abierta, si la hay, **no se vende automáticamente**: vender sería una
-orden nueva. Queda registrada para que decidas qué hacer.
-
-### Reanudar (acción manual)
-
-El bot **nunca se reanuda solo**, ni siquiera al empezar un nuevo día UTC:
+### Kill switch, reanudar y estado
 
 ```bash
-npm run status    # revisa por qué se detuvo
-npm run resume    # borra la parada y el archivo STOP
-npm start
+npm run kill -- "motivo"    # detiene el bot de forma segura
+npm run status              # muestra por qué está detenido, PnL del día, posiciones, eventos
+npm run resume              # reanuda (acción manual obligatoria)
 ```
 
-Si la parada fue por pérdida máxima, `npm run resume` se niega mientras la pérdida
-realizada del día UTC siga en el límite, e indica desde cuándo se puede reanudar
-(00:00 UTC del día siguiente).
+- **`npm run kill`** crea el archivo `STOP` y registra la parada en SQLite para
+  **todos** los entornos y modos.
+  - Si el bot está corriendo, lo detecta en ~1 s: cancela las órdenes pendientes y se detiene.
+  - Si no está corriendo, no podrá arrancar.
+  - Funciona aunque la configuración tenga errores. También sirve crear el archivo a mano.
+- **`npm run resume`** reanuda el entorno y modo configurados en el `.env`.
+  - El bot **nunca se reanuda solo**, ni al empezar un nuevo día.
+  - Si la parada fue por pérdida máxima, se niega a reanudar mientras la pérdida
+    realizada de hoy (UTC) siga en el límite, e indica desde cuándo se podrá.
+- **`npm run status`** lee la base de datos, sin usar la red.
 
-`npm run resume` reanuda **solo el entorno y modo configurados** en el `.env`.
-Si el kill switch detuvo todo y luego cambias de entorno (p. ej. de `dry-run` a
-enviar órdenes al testnet), ese otro entorno también requiere su propio `resume`.
+### Reconciliación e idempotencia
 
-### Persistencia
+- **Al arrancar**, el bot compara su registro con Binance:
+  - Las órdenes sin terminar se consultan por `clientOrderId` y se registra su estado real.
+  - Las órdenes abiertas en Binance que el bot no registró son una diferencia.
+  - Los saldos se comparan con lo esperado (foto de referencia + ejecuciones
+    registradas); si no cuadran, es una diferencia.
 
-El estado de riesgo vive en SQLite (`DB_PATH`, por defecto `data/bot.db`):
-la parada, las posiciones (con sus comisiones) y una bitácora de eventos.
-**Reiniciar el bot no resetea nada**: la pérdida acumulada del día, las posiciones
-abiertas y la parada se recuperan al arrancar. Cada entorno y modo tiene su
-propio estado (ver [Almacenamiento](#almacenamiento)).
-
-## Almacenamiento
-
-Todo se guarda en SQLite (`DB_PATH`). El esquema se crea y actualiza con
-**migraciones versionadas** ([src/storage/migrations.js](src/storage/migrations.js)):
-cada una se aplica una sola vez, en su propia transacción, y queda registrada en
-la tabla `schema_migrations`. `npm run status` muestra la versión actual.
-
-### Entornos: los datos nunca se mezclan
-
-Cada registro indica su **entorno** y, si es de trading, su **modo**:
-
-| Entorno | Qué es | Qué se guarda |
-|---|---|---|
-| `testnet` | Spot Testnet | órdenes, ejecuciones, posiciones, riesgo, eventos, velas |
-| `demo` | Demo Mode | órdenes, ejecuciones, posiciones, riesgo, eventos, velas |
-| `production-readonly` | datos públicos de producción, **solo lectura** | solo velas (para el backtest) |
-
-| Modo | Qué es |
-|---|---|
-| `dry-run` | órdenes simuladas, nunca enviadas |
-| `exchange` | órdenes enviadas al exchange del entorno (testnet o demo) |
-
-Cada repositorio se crea para un entorno (y modo) y **todas** sus consultas y
-reportes filtran por él. La base de datos también lo garantiza por su cuenta:
-no acepta órdenes, posiciones ni eventos de producción, y un trigger impide que
-una ejecución o una posición quede enlazada a una orden de otro entorno.
-
-### Tablas
-
-| Tabla | Contenido |
-|---|---|
-| `orders` | cada orden: ID de Binance, `clientOrderId` propio, par, lado, tipo, cantidad, precio, estado, cantidad ejecutada, precio promedio, comisión y timestamps. **Incluye las rechazadas**, con su origen (`risk` o `exchange`), código y motivo |
-| `order_fills` | ejecuciones parciales de cada orden, con su comisión (moneda original y valor en USDT). La misma ejecución nunca se cuenta dos veces |
-| `positions` | compra → venta, con comisiones y PnL realizado |
-| `risk_state` | parada activa, una fila por entorno × modo |
-| `events` | bitácora: paradas, reanudaciones, fallos al cancelar |
-| `candles` | caché de velas cerradas; clave única (entorno, par, intervalo, inicio) |
-
-Estados de una orden: `pending` (registrada, aún sin confirmar) → `open` →
-`partially_filled` → `filled`, o bien `canceled` / `expired` / `rejected`.
-
-### Caché de velas y huecos
-
-Las velas se guardan solo si están **cerradas** y **alineadas** a su intervalo;
-repetir una descarga no crea duplicados. Antes de un backtest se buscan
-**huecos** (velas faltantes en el rango) y se muestra un aviso con cada hueco y
-el porcentaje faltante: un hueco puede ser real (mantenimiento de Binance) o un
-error de descarga, y en ambos casos el backtest saltaría ese periodo.
-
-## Datos de mercado
-
-Todo el flujo de datos está en [src/data/](src/data/). La estrategia **solo recibe
-velas cerradas**: la vela en curso cambia hasta su cierre y una señal basada en
-ella podría desaparecer.
-
-### Fuentes (`DATA_FEED`)
-
-| Modo | Cómo llegan las velas |
-|---|---|
-| `rest` (por defecto) | consulta REST ~2 s después de cada cierre, más una consulta de precio cada 15 s |
-| `ws` | stream WebSocket `<par>@kline_<intervalo>`; REST solo para rellenar huecos |
-
-En modo `ws` se usa un cliente propio (paquete `ws`) en lugar de `watchOHLCV` de
-ccxt, porque ccxt descarta el campo `x` con el que Binance indica si la vela
-está cerrada. Las actualizaciones de la vela en curso solo actualizan el precio.
-
-### Conexión WebSocket
-
-- **Pings:** Binance envía un ping cada ~20 s y corta si no recibe el pong; el bot
-  responde cada uno.
-- **Cierre a las 24 h:** Binance corta toda conexión a las 24 h. El bot la rota
-  por su cuenta a las 23 h y, si igual se corta, reconecta.
-- **Conexión zombi:** sin mensajes ni pings durante 60 s, se fuerza la reconexión.
-- **Reconexión** automática con backoff exponencial (1 s, 2 s, 4 s… hasta 60 s) y
-  jitter (una parte al azar, para no reintentar todos a la vez).
-- **Relleno de huecos:** al reconectar, las velas cerradas durante el corte se
-  descargan por REST (solo las que faltan en el caché, sin duplicados) **antes**
-  de reanudar. Solo se emite la más reciente: una señal de hace varias velas no
-  se ejecuta tarde.
-
-### Límites de la API
-
-- El peso usado se lee de la cabecera `X-MBX-USED-WEIGHT-1M` de cada respuesta.
-  Al llegar al 80% del límite (6000 por minuto), el bot espera al minuto siguiente.
-- **429** (demasiadas peticiones): se espera lo que indica `Retry-After`.
-- **418** (IP bloqueada por ignorar los 429): se detienen **todas** las peticiones y
-  se registra un error con la hora de fin del bloqueo.
-
-### Hora del servidor
-
-La hora se sincroniza con Binance al arrancar y cada 30 minutos (compensando la
-latencia de la red). Se usa para firmar las peticiones (evita el error `-1021`
-de timestamp) y para decidir cuándo una vela está cerrada.
-
-### Datos desactualizados
-
-Si pasan más de `DATA_STALE_AFTER_SECONDS` sin señales de la fuente (mensajes,
-pings o respuestas REST), o sin la última vela cerrada, los datos se marcan
-**desactualizados** y el gestor de riesgo **bloquea toda orden nueva** hasta que
-se recuperen. También están bloqueadas mientras se rellenan huecos.
-
-## Ejecución de órdenes
-
-Todo el código está en [src/execution/](src/execution/). El **ejecutor** es la
-única forma de operar, y cada orden sigue siempre el mismo flujo, en dry-run y
-en testnet/demo:
-
-1. Calcula la cantidad (tope por operación, o la posición a cerrar).
-2. Genera un `clientOrderId` propio y consulta al **gestor de riesgo**. Si rechaza,
-   la orden se registra como rechazada, con su motivo, y no sale.
-3. Guarda la orden en SQLite como `pending` **antes** de enviarla.
-4. La envía con la aprobación del riesgo.
-5. Registra las ejecuciones y actualiza la posición con lo **realmente ejecutado**.
-
-### Nadie se salta el riesgo
-
-- La aprobación del riesgo es un objeto que solo `checkOrder()` puede crear, válido
-  para **una** orden exacta (mismo `clientOrderId`, lado, cantidad…), **una** vez y
-  durante 30 s. El envío simulado y el real la exigen.
-- El cliente ccxt tiene un **filtro de red**: toda petición que crea órdenes
-  (`/api/v3/order`, OCO, SOR…) debe llevar un `clientOrderId` autorizado con esa
-  aprobación. Ni `exchange.createOrder()` llamado directamente puede enviar una orden.
-- La WebSocket API de Binance (otro canal para crear órdenes) está bloqueada.
-
-### Idempotencia: nunca reenviar a ciegas
-
-Si al enviar hay un timeout o error de red, no se sabe si la orden llegó. El bot
-**no la reenvía**: espera a que venza la ventana de Binance (`recvWindow`, 5 s;
-pasado ese tiempo la orden ya no puede entrar) y la **consulta por `clientOrderId`**:
-
-| Resultado de la consulta | Qué hace el bot |
-|---|---|
-| La orden existe | registra su estado y ejecuciones reales |
-| No existe | la marca como no creada (`NOT_CREATED`) |
-| No se puede consultar | queda `pending` y bloquea nuevas órdenes del par hasta resolverla |
-
-Además, una señal de la estrategia produce como máximo **una** orden (clave única
-por señal), y el filtro de red rechaza enviar dos veces el mismo `clientOrderId`.
-
-### Reconciliación al iniciar
-
-Antes de operar, el bot compara su registro con Binance:
-
-- **Órdenes sin terminar** en el registro: consulta su estado real y lo registra.
-- **Órdenes abiertas en Binance** que el bot no registró → diferencia.
-- **Saldos**: esperado = foto de referencia + ejecuciones registradas desde
-  entonces (con comisiones). Si Binance dice otra cosa → diferencia. La primera
-  vez se toma la foto de referencia.
-
-Si hay diferencias, se registran (log y bitácora) y **no se opera** hasta
-resolverlas:
-
-```bash
-npm run reconcile                         # muestra las diferencias
-npm run reconcile -- --cancel-unknown     # cancela órdenes abiertas que el bot no registró
-npm run reconcile -- --accept-balances    # acepta los saldos actuales (tras revisarlos)
-```
-
-`--accept-balances` es útil, por ejemplo, cuando el testnet reinicia los saldos.
-
-### Dry-run
-
-Está activado por defecto y usa **el mismo flujo** (riesgo, registro, comisión y
-slippage simulados). Las órdenes se registran con modo `dry-run` y su
-`clientOrderId` empieza con `sbtp-`. Para enviar órdenes al testnet/demo hay que
-escribir exactamente `DRY_RUN=false` en el `.env`. Al arrancar se muestra una
-advertencia destacada y hay 5 s para cancelar con Ctrl+C.
-
-### Ejecuciones parciales
-
-Una orden de mercado puede ejecutarse solo en parte (queda `expired`). La posición
-registra la cantidad ejecutada, descontando la comisión si se cobró en la moneda
-base. En una venta parcial, la parte vendida queda como operación cerrada y la
-posición sigue abierta con lo que queda.
-
-## Ciclo del bot
-
-`npm start` ejecuta [src/index.js](src/index.js) → [src/app.js](src/app.js) (arranque) →
-[src/bot.js](src/bot.js) (ciclo y apagado).
-
-### Arranque, en este orden
-
-| Paso | Qué verifica | Si falla |
-|---|---|---|
-| 1. Configuración y entorno | config válida, advertencia si no es dry-run, estrategia, guardia de red (bloqueo de mainnet), conexión, mercado y credenciales | no arranca |
-| 2. Hora | sincroniza con el servidor de Binance | no arranca |
-| 3. Estado de riesgo | parada guardada, kill switch, posiciones y PnL del día desde SQLite | no arranca |
-| 4. Reconciliación | órdenes y saldos contra Binance; límites de riesgo | no arranca |
-| 5. Velas históricas | suficientes para calentar los indicadores | no arranca |
-
-Si un paso falla, el bot cierra lo que alcanzó a abrir y explica el paso y el motivo.
-
-### Una vela a la vez
-
-Cada vela cerrada pasa por: límites de riesgo → estrategia → orden (si hay
-señal) → límites otra vez. Las velas se procesan **de a una y en orden**: si llega
-una mientras otra se procesa, espera en la cola. Una señal de una vela que cerró
-hace más de `DATA_STALE_AFTER_SECONDS` (por ejemplo, rellenada tras un corte) no se
-opera. Si procesar velas falla 3 veces seguidas, el bot se apaga de forma segura.
-
-### Apagado ordenado
-
-Con **Ctrl+C** (SIGINT) o **SIGTERM**, y también ante una excepción no controlada o
-una promesa rechazada sin manejar:
-
-1. Deja de aceptar velas y señales nuevas (las que estaban en cola se descartan).
-2. Espera a que termine la operación en curso, como máximo `SHUTDOWN_TIMEOUT_SECONDS`.
-3. Cancela las órdenes pendientes no ejecutadas.
-4. Guarda el estado y el motivo en SQLite (evento `SHUTDOWN`).
-5. Cierra el WebSocket, los timers, el cliente y la base de datos.
-
-**Las posiciones abiertas NO se cierran ni se venden** al apagar: vender es una
-decisión de trading, y apagar el bot no debe tomar decisiones de trading. Un
-**segundo Ctrl+C** fuerza la salida inmediata (queda registrado como advertencia).
-El kill switch y la pérdida máxima diaria también terminan en este apagado.
-
-### Heartbeat
-
-Cada `HEARTBEAT_SECONDS` se registra el estado: entorno y modo, estrategia,
-última vela procesada, precio, posiciones abiertas, PnL del día y estado de los datos.
+  Mientras haya diferencias, **no se opera**. Ver `npm run reconcile` en
+  [Problemas comunes](#problemas-comunes).
+- **Idempotencia:** si al enviar una orden hay un timeout, el bot **no la reenvía**.
+  Espera a que venza la ventana de Binance (`recvWindow`, 5 s) y la consulta por su
+  `clientOrderId`. Una señal produce como máximo una orden.
 
 ## Backtest
 
@@ -350,68 +385,227 @@ npm run backtest -- --from 2025-01-01 --to 2025-07-01 --split 2025-05-01 --grid 
 
 | Opción | Por defecto | Qué hace |
 |---|---|---|
-| `--from`, `--to` | obligatorias | período en UTC (`to` exclusivo) |
-| `--symbol`, `--timeframe` | `SYMBOL`, `TIMEFRAME` | par e intervalo |
-| `--strategy`, `--params` | `STRATEGY`, `STRATEGY_PARAMS` | estrategia y parámetros (JSON) |
-| `--capital` | `BACKTEST_CAPITAL` (20) | capital inicial en USDT |
-| `--fee`, `--slippage-bps` | `FEE_RATE`, `SLIPPAGE_BPS` | comisión y slippage simulados |
-| `--split FECHA` | — | ajuste en `[from, split)`, validación en `[split, to)` |
-| `--grid JSON` | — | valores a probar en el período de ajuste (requiere `--split`) |
-| `--allow-gaps` | no | correr aunque falten velas |
-| `--no-save` | no | no guardar en SQLite ni exportar CSV |
+| `--from`, `--to` | obligatorias | Período en UTC (`AAAA-MM-DD`). `to` es exclusivo. |
+| `--symbol`, `--timeframe` | `SYMBOL`, `TIMEFRAME` | Par e intervalo. |
+| `--strategy`, `--params` | `STRATEGY`, `STRATEGY_PARAMS` | Estrategia y parámetros (JSON). |
+| `--capital` | `BACKTEST_CAPITAL` (20) | Capital inicial en USDT. |
+| `--fee`, `--slippage-bps` | `FEE_RATE`, `SLIPPAGE_BPS` | Comisión y slippage simulados. |
+| `--split FECHA` | — | Ajuste en `[from, split)`, validación en `[split, to)`, reportados por separado. |
+| `--grid JSON` | — | Valores a probar en el período de ajuste (requiere `--split`). |
+| `--allow-gaps` | no | Correr aunque falten velas. |
+| `--no-save` | no | No guardar en SQLite ni exportar CSV. |
 
-Los límites de riesgo (`MAX_TRADE_USDT`, `MAX_DAILY_LOSS_USDT`, `MAX_OPEN_POSITIONS`) son los del `.env`.
+Los límites de riesgo (`MAX_TRADE_USDT`, `MAX_DAILY_LOSS_USDT`,
+`MAX_OPEN_POSITIONS`) son los del `.env`. No hacen falta API keys.
 
-### Datos: producción, solo lectura
+**Cómo simula** ([src/backtest/engine.js](src/backtest/engine.js)):
 
-Las velas vienen de `data-api.binance.vision`, el dominio de Binance que solo sirve
-datos públicos de mercado (ahí los endpoints de órdenes no existen). El cliente
-([src/backtest/market-data-client.js](src/backtest/market-data-client.js)) no usa
-API keys, no usa ccxt ni el módulo de ejecución, y no tiene ningún método para
-órdenes. Las velas se guardan en el caché SQLite con entorno `production-readonly`:
-repetir un backtest no vuelve a descargarlas.
-
-**Huecos:** si faltan velas en el período (por ejemplo, la caída de Binance del
-24/03/2023 entre 12:40 y 13:59 UTC), el backtest avisa y **no corre**, salvo con
-`--allow-gaps`.
-
-### Cómo simula ([src/backtest/engine.js](src/backtest/engine.js))
-
-- **Los mismos módulos que en vivo:** la misma clase de estrategia, el mismo
-  `RiskManager` (tope por operación, máximo de posiciones, filtros del par,
-  pérdida diaria, PnL con comisiones), el mismo `OrderExecutor` y la misma
-  simulación de ejecución que el dry-run. Todo sobre una base SQLite en memoria,
-  propia de cada corrida, con un reloj simulado.
+- **Datos de producción en solo lectura.** Vienen de `data-api.binance.vision`, un
+  dominio que solo sirve datos públicos; ahí los endpoints de órdenes ni siquiera
+  existen. El cliente no usa API keys ni tiene métodos para órdenes. Las velas
+  quedan en el caché SQLite: repetir un backtest no las vuelve a descargar.
+- **Los mismos módulos que en vivo:** misma estrategia, mismo `RiskManager`, mismo
+  `OrderExecutor` y misma simulación de ejecución que el dry-run, sobre una base
+  SQLite en memoria y con un reloj simulado.
 - **Sin sesgo de futuro:** la señal se calcula al **cierre** de una vela y la orden
-  se ejecuta a la **apertura de la vela siguiente**, más slippage. Una señal en la
-  última vela del período no se ejecuta.
-- **Capital:** cada compra usa como máximo `min(MAX_TRADE_USDT, saldo disponible)`,
-  redondeado al paso del par. Si el capital no alcanza el mínimo del par, no corre.
-- **Pérdida diaria:** si se alcanza, el riesgo detiene el "bot" igual que en vivo
-  (no se envían órdenes, ni ventas); aquí la reanudación manual se simula a las
-  00:00 UTC del día siguiente.
-- **Posición abierta al final:** se valora como si se vendiera al último cierre
-  (con slippage y comisión), pero no cuenta como operación cerrada.
+  se ejecuta a la **apertura de la siguiente**, más slippage.
+- **Capital:** cada compra usa como máximo `min(MAX_TRADE_USDT, saldo)`, redondeado
+  al paso del par. Si el capital no alcanza el mínimo del par, no corre.
+- **Pérdida diaria:** detiene el "bot" igual que en vivo. Aquí la reanudación manual
+  se simula a las 00:00 UTC siguientes.
+- **Huecos:** si faltan velas (por ejemplo, la caída de Binance del 24/03/2023 entre
+  12:40 y 13:59 UTC), avisa y **no corre** salvo con `--allow-gaps`.
 - **Reproducible:** mismas velas y parámetros → mismo resultado, siempre.
 
-### Reporte
+### Cómo interpretar el reporte
 
-Número de operaciones, ganancia/pérdida neta (USDT y %), % de operaciones ganadoras,
-ganancia y pérdida promedio, profit factor (ganancias brutas ÷ pérdidas brutas),
-máximo drawdown (USDT y %), comisiones pagadas, y comparación con **comprar y
-mantener** en el mismo período (con la misma comisión, slippage y filtros).
+| Métrica | Qué es | Cómo leerla |
+|---|---|---|
+| **Operaciones** | Compras y ventas completadas (cerradas). | Con pocas (menos de ~30), el resultado puede ser casualidad. |
+| **Ganancia/pérdida neta** | Capital final − inicial, en USDT y %, con comisiones y slippage. Una posición abierta al final se valora como si se vendiera al último cierre. | Es el resultado real de la estrategia. |
+| **% ganadoras** | Operaciones con ganancia ÷ total. | Por sí sola engaña: 70% ganadoras puede perder dinero si las pérdidas son grandes. |
+| **Ganancia / pérdida promedio** | PnL medio de las ganadoras y de las perdedoras. | Junto al % de ganadoras da la expectativa por operación: `%gan × gan.prom + %perd × pérd.prom`. |
+| **Profit factor** | Ganancias brutas ÷ pérdidas brutas. | `> 1`: gana más de lo que pierde. `< 1`: pierde. `—`: sin operaciones perdedoras o sin operaciones. |
+| **Máximo drawdown** | La mayor caída del capital desde un máximo hasta un mínimo posterior (USDT y %). | Mide el riesgo: cuánto tendrías que aguantar en el peor momento. |
+| **Comisiones pagadas** | Suma de las comisiones de todas las ejecuciones. | Si superan la ganancia bruta, la estrategia opera demasiado para su ventaja. |
+| **Comprar y mantener** | Comprar con todo el capital a la apertura del período y vender al cierre, con las mismas comisiones, slippage y filtros. | Si la estrategia no le gana, no aporta. |
+| **Estrategia vs. comprar y mantener** | Diferencia en USDT. | Positiva: la estrategia fue mejor. |
+| **Paradas / rechazos / posición abierta** | Paradas por pérdida diaria, órdenes rechazadas por el riesgo (por código) y posición sin cerrar al final. | Muestran cuánto intervino el riesgo. |
 
-### Ajuste y validación
+**Ajuste y validación.** Con `--split`, el período se divide en uno de **ajuste** y
+otro posterior de **validación**, y cada uno se corre con su propio capital. Con
+`--grid`, cada combinación válida se prueba **solo en el de ajuste**, se elige la
+de mayor PnL neto y **solo esa** se valida con datos que no se usaron para
+elegirla. Si le va bien en el ajuste y mal en la validación, hay **sobreajuste**:
+los parámetros se acomodaron al pasado.
 
-Con `--split`, cada período se corre y reporta por separado, con su propio capital.
-Con `--grid`, cada combinación válida de parámetros se prueba **solo en el período
-de ajuste**, se elige la mejor (mayor PnL neto) y **solo esa** se corre en el de
-validación, con datos que no se usaron para elegirla. Un buen resultado en el
-ajuste y malo en la validación es la señal clásica de *sobreajuste*.
+**Resultados guardados.** Cada resultado queda en SQLite:
+- `backtest_runs` guarda parámetros, período, fecha, comisión, slippage, límites,
+  filtros del par y todas las métricas;
+- `backtest_trades` guarda cada operación.
 
-### Resultados guardados
+Ajuste y validación comparten `group_id`. Las operaciones se exportan a
+`data/backtests/backtest-<id>-<período>.csv`.
 
-Cada resultado se guarda en SQLite (`backtest_runs`: parámetros, período, fecha,
-comisión, slippage, límites, filtros del par y todas las métricas; `backtest_trades`:
-cada operación). Ajuste y validación comparten `group_id`. Las operaciones se
-exportan a CSV en `data/backtests/backtest-<id>-<período>.csv`.
+## Pruebas
+
+```bash
+npm test               # toda la suite (Vitest)
+npm run test:watch     # modo observación mientras editas
+npx vitest run test/backtest    # solo una carpeta
+```
+
+Son **539 pruebas en 35 archivos**. No usan la red ni API keys: Binance se simula a
+nivel HTTP (a través del cliente ccxt real) y el WebSocket con un socket falso.
+Incluyen:
+- la guardia contra mainnet;
+- los casos borde de la estrategia;
+- cada límite de riesgo, el reinicio con estado guardado y el kill switch;
+- timeouts de órdenes (creadas y no creadas), reenvíos bloqueados, ejecuciones
+  parciales y reconciliación;
+- la cola de velas y el apagado ordenado;
+- una integración completa en dry-run;
+- un backtest de 16 velas calculado a mano.
+
+## Problemas comunes
+
+**`STRATEGY: es obligatoria` / `No se encontró .env`**
+Falta el archivo de configuración. Ejecuta `cp .env.example .env`.
+
+**Caracteres raros en la consola (`Configuraci├│n`)**
+Está corregido: el logger escribe por la API Unicode de la consola. Si aún ves
+caracteres raros en una terminal antigua, ejecuta `chcp 65001` antes de `npm start`.
+
+**Error de timestamp: `-1021 Timestamp for this request is outside of the recvWindow`**
+El reloj de tu PC está desfasado. El bot se sincroniza con Binance y compensa, y avisa
+en el log si el desfase supera 1 s. Si el error persiste, sincroniza la hora del
+sistema. En Windows: *Configuración → Hora e idioma → Sincronizar ahora*.
+
+**Límites de peticiones: `429` o `418`**
+- **429:** el bot espera lo que indica `Retry-After` y sigue solo.
+- **418:** Binance **bloqueó tu IP** por seguir pidiendo después de un 429. El bot
+  detiene todas las peticiones y registra hasta cuándo dura el bloqueo. **No lo
+  reinicies en bucle**: cada intento alarga el bloqueo (de 2 minutos hasta 3 días).
+  Espera a la hora indicada.
+- Suele pasar al correr varias instancias o scripts pesados a la vez.
+
+**API keys inválidas: `-2008`, `-2014` o `-2015`**
+- **Otro entorno:** keys del testnet con `BINANCE_ENV=demo`, o al revés, o keys de
+  Binance real.
+- **Copiado incompleto:** espacios o caracteres de más al copiar.
+- **Restricción por IP** que no incluye tu IP actual.
+- **Permisos:** falta el permiso de trading Spot (en demo).
+- **Reinicio del testnet:** si lo reiniciaron, puede que tengas que generar una key nueva.
+
+**El bot no arranca: "detenido desde…" o "kill switch activo"**
+Hubo una parada (kill switch o pérdida máxima). Revisa el motivo con `npm run status`
+y reanuda con `npm run resume`.
+
+**El bot no arranca: diferencias en la reconciliación**
+
+```bash
+npm run reconcile                         # muestra cada diferencia
+npm run reconcile -- --cancel-unknown     # cancela órdenes abiertas que el bot no registró
+npm run reconcile -- --accept-balances    # acepta los saldos actuales tras revisarlos
+```
+
+El caso típico es el **reinicio mensual del testnet**: los saldos cambian → revisa y
+usa `--accept-balances`.
+
+**`con MAX_TRADE_USDT=… no se puede comprar`**
+El monto por operación no alcanza el valor mínimo de orden del par (5 USDT en
+BTC/USDT, más un margen para comisión y slippage). Sube `MAX_TRADE_USDT`.
+
+**Datos con huecos**
+- **En el backtest:** suelen ser reales (mantenimiento o caídas de Binance). Elige
+  otro período o usa `--allow-gaps`, sabiendo que el backtest saltará ese tramo.
+- **En vivo:** si faltan velas, el bot las rellena por REST. Mientras tanto los datos
+  figuran como desactualizados y las órdenes se bloquean. Si persiste, revisa tu
+  conexión o sube `DATA_STALE_AFTER_SECONDS`.
+
+**"hay N velas y la estrategia necesita M" al arrancar**
+No hay suficiente historial para calentar los indicadores (par nuevo o datos
+recortados en el testnet). Prueba otro par o un intervalo más corto.
+
+**`npm install` falla con `gyp ERR!` / "Could not find any Visual Studio installation"**
+npm está intentando compilar `better-sqlite3`, que no lo necesita porque trae sus
+binarios. Verifica que exista el archivo `.npmrc` del proyecto (con
+`ignore-scripts=true`) y usa Node 22.12 o superior. Luego borra `node_modules` y
+vuelve a correr `npm install`. Si en el futuro agregas una dependencia que sí
+necesita compilarse, ejecuta `npm rebuild <paquete> --ignore-scripts=false`.
+
+**Ctrl+C en Windows**
+En la terminal funciona normal: primer Ctrl+C = apagado ordenado, segundo = salida
+forzada. Enviar SIGTERM desde otro proceso no existe en Windows: termina el proceso
+de golpe. Usa Ctrl+C o `npm run kill`.
+
+## Estructura de carpetas
+
+```
+binance-spot-bot/
+├── src/
+│   ├── index.js              punto de entrada: config, arranque y señales del sistema
+│   ├── app.js                secuencia de arranque en 5 pasos
+│   ├── bot.js                ciclo: cola de velas, heartbeat y apagado ordenado
+│   ├── lifecycle.js          Ctrl+C / SIGTERM / errores no controlados → apagado
+│   ├── config/
+│   │   ├── index.js          lectura y validación del .env (zod)
+│   │   ├── safety.js         guardia de red: solo testnet/demo, nunca mainnet
+│   │   └── preflight.js      verificación de conexión, mercado y credenciales
+│   ├── data/
+│   │   ├── candle-feed.js    feed de velas cerradas (REST o WebSocket) con relleno de huecos
+│   │   ├── kline-stream.js   cliente WebSocket: pings, reconexión, rotación de 24 h
+│   │   ├── candle-fetcher.js descarga REST paginada
+│   │   ├── rate-limiter.js   peso de la API, 429 y 418
+│   │   ├── time-sync.js      hora del servidor
+│   │   └── data-health.js    detección de datos desactualizados
+│   ├── strategy/
+│   │   ├── base-strategy.js  interfaz común de estrategias
+│   │   ├── registry.js       detección de estrategias disponibles
+│   │   ├── indicators.js     SMA
+│   │   └── strategies/sma-cross.js
+│   ├── risk/
+│   │   ├── risk-manager.js   límites, aprobaciones, PnL diario, parada de emergencia
+│   │   ├── market-filters.js filtros del par (paso, tick, mínimos)
+│   │   ├── pnl.js            PnL con comisiones y día UTC
+│   │   └── kill-switch.js    archivo STOP
+│   ├── execution/
+│   │   ├── executor.js       única vía para operar (idempotente)
+│   │   ├── venues.js         ejecución simulada (dry-run) y real (testnet/demo)
+│   │   ├── order-gate.js     filtro de red: ninguna orden sin aprobación
+│   │   ├── reconciler.js     reconciliación con el exchange
+│   │   ├── fill-model.js     comisión y slippage simulados
+│   │   └── index.js          armado según el modo
+│   ├── storage/
+│   │   ├── db.js, migrations.js   SQLite y migraciones versionadas
+│   │   ├── scope.js               entornos y modos (los datos nunca se mezclan)
+│   │   ├── risk-store.js, order-store.js, candle-store.js, balance-store.js
+│   ├── backtest/
+│   │   ├── engine.js         motor (mismos módulos que en vivo)
+│   │   ├── command.js        descarga, huecos, ajuste/validación, guardado
+│   │   ├── market-data-client.js  datos de producción de solo lectura
+│   │   ├── metrics.js, report.js, results.js
+│   └── lib/                  exchange (ccxt protegido), logger, backoff, velas, IDs, intervalos
+├── scripts/                  npm run kill | resume | status | feed | reconcile | backtest
+├── test/                     pruebas (Vitest), con simuladores de Binance y WebSocket
+├── data/                     (ignorado por git) bot.db, logs y CSV de backtests
+├── .env.example              plantilla de configuración
+├── .npmrc                    ignore-scripts=true (instalación sin compilar nada)
+└── package.json
+```
+
+## Decisiones técnicas
+
+- **ccxt** en lugar del conector oficial `@binance/spot`. Trae los filtros del par
+  ya interpretados, un limitador de peticiones y una sola API para REST. Además
+  soporta explícitamente el Spot Testnet (`setSandboxMode`) y el Demo
+  (`enableDemoTrading`).
+- **Cliente WebSocket propio** para las velas. `watchOHLCV` de ccxt descarta el
+  campo `x` con el que Binance marca una vela como cerrada.
+- **better-sqlite3** (síncrono): cada registro queda en disco al volver de la
+  llamada. Si el proceso muere justo después de guardar una parada, la parada ya
+  está guardada.
+- **zod** para validar la configuración al arrancar; **pino** para logs con niveles
+  y timestamps; **Vitest** por su soporte nativo de ES modules.
+- **Dinero en USDT y día en UTC** en todo el sistema. Los montos se validan con los
+  filtros reales del par antes de enviar cualquier orden.
