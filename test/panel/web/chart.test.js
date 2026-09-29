@@ -56,6 +56,15 @@ describe('atribución de lightweight-charts (licencia) sin romper la CSP', () =>
   });
 });
 
+describe('interacción con el gráfico', () => {
+  it('la rueda del mouse desplaza la página (el gráfico no la "atrapa"); el zoom queda en los ejes y el pellizco', async () => {
+    const fs = await import('node:fs');
+    const chart = fs.readFileSync(new URL('../../../panel/web/src/components/CandleChart.jsx', import.meta.url), 'utf8');
+    expect(chart).toMatch(/handleScroll: \{ mouseWheel: false/);
+    expect(chart).toMatch(/handleScale: \{ mouseWheel: false, pinch: true, axisPressedMouseMove: true \}/);
+  });
+});
+
 describe('eje de tiempo en hora local', () => {
   it('etiqueta según la escala (año, mes, día, hora, hora con segundos)', () => {
     const local = new Date(2026, 8, 29, 7, 5, 9); // 29-09-2026 07:05:09 hora LOCAL

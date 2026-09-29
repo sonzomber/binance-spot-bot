@@ -30,6 +30,10 @@ export function CandleChart({ chart, colors, onHover }) {
       autoSize: true,
       layout: { attributionLogo: false, fontFamily: getComputedStyle(document.body).fontFamily }, // enlace propio: ver arriba
       crosshair: { mode: CrosshairMode.Normal },
+      // La rueda del mouse desplaza la PÁGINA (si no, el gráfico la "atrapa" al pasar por encima).
+      // Zoom: arrastrando los ejes o con dos dedos; desplazamiento: arrastrando el gráfico.
+      handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
+      handleScale: { mouseWheel: false, pinch: true, axisPressedMouseMove: true },
       rightPriceScale: { borderVisible: false },
       timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false, tickMarkFormatter: (time, type) => tickLabel(time, type) },
       localization: { timeFormatter: (time) => dateTime(time * 1000, { seconds: false }), priceFormatter: (p) => price(p) },

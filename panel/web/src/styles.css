@@ -405,6 +405,7 @@ a {
 /* --- Tarjetas ----------------------------------------------------------------------- */
 
 .card {
+  position: relative;
   min-width: 0;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -715,6 +716,7 @@ a {
 }
 
 .table-wrap {
+  position: relative; /* contiene los elementos ocultos con posición absoluta (si no, agrandan la página) */
   overflow-x: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -837,4 +839,253 @@ a {
 
 .attribution:hover {
   color: var(--accent);
+}
+
+/* --- Filtros ------------------------------------------------------------------------------ */
+
+.filters {
+  display: grid;
+  gap: 10px;
+}
+
+.filters-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  --tone: var(--neutral);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chip-ok { --tone: var(--ok); }
+.chip-info { --tone: var(--info); }
+.chip-warn { --tone: var(--warn); }
+.chip-danger { --tone: var(--danger); }
+.chip-neutral { --tone: var(--neutral); }
+
+.chip:hover {
+  border-color: color-mix(in srgb, var(--tone) 50%, var(--border));
+}
+
+.chip.is-on {
+  border-color: var(--tone);
+  background: color-mix(in srgb, var(--tone) 14%, var(--surface));
+  color: var(--tone);
+}
+
+.chip-count {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+.segmented {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.segmented button {
+  height: 30px;
+  padding: 0 12px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  font: inherit;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.segmented button:last-child {
+  border-right: 0;
+}
+
+.segmented button.is-on {
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+  color: var(--accent);
+}
+
+.search input {
+  width: min(260px, 100%);
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+/* --- Tabla de órdenes -------------------------------------------------------------------- */
+
+.muted {
+  color: var(--text-muted);
+}
+
+.mono {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.table .mono {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.table .wrap {
+  min-width: 200px;
+  white-space: normal;
+}
+
+.side {
+  font-weight: 650;
+}
+
+.side-buy { color: var(--ok); }
+.side-sell { color: var(--danger); }
+
+.link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.table tr.is-open td {
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+}
+
+.detail-row td {
+  padding: 4px 14px 10px;
+  background: var(--surface-2);
+  white-space: normal;
+}
+
+.pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* --- Logs ------------------------------------------------------------------------------ */
+
+.logs {
+  position: relative;
+  max-height: 460px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  list-style: none;
+  font-size: 12.5px;
+}
+
+.log {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.log:last-child {
+  border-bottom: 0;
+}
+
+.log-danger {
+  background: color-mix(in srgb, var(--danger) 6%, transparent);
+}
+
+.log-warn {
+  background: color-mix(in srgb, var(--warn) 5%, transparent);
+}
+
+.log .badge {
+  height: 20px;
+  padding: 0 7px;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.log-time {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.log-general {
+  padding: 0 6px;
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.log-msg {
+  flex: 1;
+  min-width: 200px;
+  overflow-wrap: anywhere;
+}
+
+.log-details {
+  flex: 1;
+  min-width: 200px;
+}
+
+.log-details summary {
+  cursor: pointer;
+}
+
+.log-data {
+  margin: 6px 0 2px;
+  padding: 8px 10px;
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }

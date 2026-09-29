@@ -13,11 +13,13 @@ import { useLive } from './live.jsx';
 /**
  * @param {string|null} path null = no pedir nada
  * @param {object} [params]
- * @param {{ refreshMs?: number }} [options]
+ * @param {{ refreshMs?: number, followDb?: boolean }} [options]
+ *        followDb: false para datos que no salen de SQLite (p. ej. los logs, que llegan por SSE)
  * @returns {{ data: any, error: import('../lib/api.js').ApiError|null, loading: boolean, reload: () => void }}
  */
-export function useApi(path, params = {}, { refreshMs } = {}) {
-  const { dbTick } = useLive();
+export function useApi(path, params = {}, { refreshMs, followDb = true } = {}) {
+  const live = useLive();
+  const dbTick = followDb ? live.dbTick : 0;
   const url = path ? buildUrl(path, params) : null;
   const [state, setState] = useState({ url: null, data: null, error: null });
   const [tick, setTick] = useState(0);
