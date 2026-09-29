@@ -5,6 +5,7 @@
  * lee SQLite y su única escritura (el kill switch) es la misma de `npm run kill`.
  * El panel tampoco se conecta nunca a Binance (no importa ccxt ni el cliente).
  */
+import crypto from 'node:crypto';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,19 +24,21 @@ export const WEB_ROOT = fileURLToPath(new URL('../web/', import.meta.url));
  * @param {import('pino').Logger} args.logger
  * @param {number} [args.port] puerto (por defecto el de la config; 0 = uno libre, para pruebas)
  * @param {string} [args.webRoot]
- * @param {(req, res, next) => void} [args.devMiddleware]
  * @param {object} [args.overrides] para pruebas (now, activateKill, intervalMs)
  * @returns {Promise<{ url: string, port: number, token: string, server: http.Server, hub: LiveHub, close: () => Promise<void> }>}
  */
-export async function startPanel({ config, logger, port = config.port, webRoot = WEB_ROOT, devMiddleware, overrides = {} }) {
+export async function startPanel({ config, logger, port = config.port, webRoot = WEB_ROOT, overrides = {} }) {
   const database = new PanelDatabase(config.dbPath);
   const killSwitch = new KillSwitch(config.killSwitchFile);
-  const hub = new LiveHub({ database, killSwitch, logFile: config.logFile, intervalMs: overrides.intervalMs, now: overrides.now });
+  // Identificador de esta ejecución del panel (público, no es un secreto). Si cambia, la
+  // página abierta sabe que el panel se reinició y que su token ya no sirve.
+  const instanceId = crypto.randomUUID();
+  const hub = new LiveHub({ database, killSwitch, logFile: config.logFile, instanceId, intervalMs: overrides.intervalMs, now: overrides.now });
   const token = createToken();
   const listening = { port: null };
 
   const app = createPanelApp({
-    config, database, killSwitch, hub, token, logger, webRoot: path.resolve(webRoot), devMiddleware,
+    config, database, killSwitch, hub, token, instanceId, logger, webRoot: path.resolve(webRoot),
     getPort: () => listening.port,
     now: overrides.now,
     activateKill: overrides.activateKill,
@@ -58,6 +61,7 @@ export async function startPanel({ config, logger, port = config.port, webRoot =
   return {
     url,
     port: listening.port,
+    instanceId,
     token,
     server,
     hub,

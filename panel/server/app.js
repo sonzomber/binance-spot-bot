@@ -73,15 +73,15 @@ function listParam(req, name, allowed) {
  * @param {import('../../src/risk/kill-switch.js').KillSwitch} deps.killSwitch
  * @param {import('./live.js').LiveHub} deps.hub
  * @param {string} deps.token token local para el kill switch
+ * @param {string} [deps.instanceId] identificador público de esta ejecución del panel
  * @param {() => number} deps.getPort puerto real en el que escucha (para Host y Origin)
  * @param {import('pino').Logger} deps.logger
  * @param {string} deps.webRoot carpeta del frontend (panel/web)
- * @param {(req, res, next) => void} [deps.devMiddleware] Vite en modo desarrollo
  * @param {() => number} [deps.now]
  * @param {typeof activateKillSwitch} [deps.activateKill] inyectable en pruebas
  */
 export function createPanelApp({
-  config, database, killSwitch, hub, token, getPort, logger, webRoot, devMiddleware, now = Date.now,
+  config, database, killSwitch, hub, token, instanceId = null, getPort, logger, webRoot, now = Date.now,
   activateKill = activateKillSwitch,
 }) {
   const app = express();
@@ -89,7 +89,7 @@ export function createPanelApp({
   app.set('etag', false);
   app.set('query parser', 'simple');
 
-  app.use(securityHeaders({ dev: Boolean(devMiddleware) }));
+  app.use(securityHeaders());
   app.use(hostGuard(getPort));
   app.use(methodGuard(WRITE_ROUTES));
 
@@ -110,7 +110,7 @@ export function createPanelApp({
       : { scopes: [], defaultScope: config.defaultScope };
     const file = killSwitch.read();
     res.json({
-      panel: { readOnly: true, host: config.host, port: getPort(), serverTime: new Date(now()).toISOString() },
+      panel: { readOnly: true, instanceId, host: config.host, port: getPort(), serverTime: new Date(now()).toISOString() },
       database: status,
       ...scopes,
       killSwitch: { active: Boolean(file), reason: file?.reason ?? null, createdAt: file?.createdAt ?? null },
@@ -229,16 +229,12 @@ export function createPanelApp({
 
   // --- Frontend --------------------------------------------------------------------------
 
-  if (devMiddleware) {
-    app.use(devMiddleware);
-  } else {
-    app.use(express.static(path.join(webRoot, 'dist'), { index: false, dotfiles: 'ignore', redirect: false }));
-  }
+  // Siempre la interfaz COMPILADA (panel/web/dist): nunca se sirven los fuentes ni otros archivos del proyecto.
+  app.use(express.static(path.join(webRoot, 'dist'), { index: false, dotfiles: 'ignore', redirect: false }));
+  // Cualquier otra ruta GET muestra la interfaz (con el token), p. ej. al recargar en #/backtests.
   app.use((req, res, next) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return next();
-    Promise.resolve(loadIndexHtml({ webRoot, url: req.originalUrl, devMiddleware }))
-      .then((html) => res.type('html').setHeader('Cache-Control', 'no-store').send(injectToken(html, token)))
-      .catch(next);
+    res.type('html').setHeader('Cache-Control', 'no-store').send(injectToken(loadIndexHtml(webRoot), token));
   });
 
   // --- Errores ---------------------------------------------------------------------------
@@ -262,11 +258,10 @@ export function injectToken(html, token) {
   return html.includes('<head>') ? html.replace('<head>', `<head>\n    ${meta}`) : `${meta}\n${html}`;
 }
 
-async function loadIndexHtml({ webRoot, url, devMiddleware }) {
-  const file = path.join(webRoot, devMiddleware ? 'index.html' : path.join('dist', 'index.html'));
-  if (!fs.existsSync(file)) return PLACEHOLDER_HTML;
-  const html = fs.readFileSync(file, 'utf8');
-  return devMiddleware?.transformIndexHtml ? devMiddleware.transformIndexHtml(url, html) : html;
+/** index.html compilado (se relee en cada pedido: una recompilación se ve al recargar). */
+function loadIndexHtml(webRoot) {
+  const file = path.join(webRoot, 'dist', 'index.html');
+  return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : PLACEHOLDER_HTML;
 }
 
 const PLACEHOLDER_HTML = `<!doctype html>
@@ -279,8 +274,8 @@ const PLACEHOLDER_HTML = `<!doctype html>
   <body>
     <main>
       <h1>Panel del bot</h1>
-      <p>El servidor del panel está funcionando, pero la interfaz todavía no está compilada.</p>
-      <p>Compílala con <code>npm run panel:build</code> y recarga esta página.</p>
+      <p>El servidor del panel está funcionando, pero la interfaz no está compilada.</p>
+      <p>Usa <code>npm run panel</code> (compila y arranca) o compílala con <code>npm run panel:build</code> y recarga esta página.</p>
     </main>
   </body>
 </html>

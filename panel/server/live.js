@@ -22,12 +22,13 @@ export class LiveHub {
    * @param {import('./database.js').PanelDatabase} deps.database
    * @param {import('../../src/risk/kill-switch.js').KillSwitch} deps.killSwitch
    * @param {string} deps.logFile
+   * @param {string|null} [deps.instanceId] identificador de esta ejecución del panel
    * @param {number} [deps.intervalMs]
    * @param {number} [deps.keepAliveMs]
    * @param {() => number} [deps.now]
    */
-  constructor({ database, killSwitch, logFile, intervalMs = 1000, keepAliveMs = 15_000, now = Date.now }) {
-    Object.assign(this, { database, killSwitch, logFile, intervalMs, keepAliveMs, now });
+  constructor({ database, killSwitch, logFile, instanceId = null, intervalMs = 1000, keepAliveMs = 15_000, now = Date.now }) {
+    Object.assign(this, { database, killSwitch, logFile, instanceId, intervalMs, keepAliveMs, now });
     this.clients = new Set();
     this.timers = null;
     this.last = null;
@@ -49,7 +50,7 @@ export class LiveHub {
       if (this.clients.size === 0) this.#stop();
     });
     if (!this.timers) this.#start();
-    this.#send(res, 'hello', { serverTime: new Date(this.now()).toISOString(), ...this.last });
+    this.#send(res, 'hello', { instanceId: this.instanceId, serverTime: new Date(this.now()).toISOString(), ...this.last });
     return true;
   }
 

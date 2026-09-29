@@ -14,6 +14,9 @@ node_modules/
 *.db-shm
 *.log
 
+# Interfaz del panel compilada (se genera con `npm run panel` o `npm run panel:build`)
+/panel/web/dist/
+
 # Kill switch (archivo creado por `npm run kill`)
 /STOP
 

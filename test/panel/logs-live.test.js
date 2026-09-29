@@ -111,13 +111,16 @@ describe('tiempo real (SSE)', () => {
 
   const waitFor = (live, name) => expect.poll(() => live.events.find((e) => e.event === name), { timeout: 3000 }).toBeTruthy();
 
-  it('saludo inicial con el estado de la base y el kill switch', async () => {
+  it('saludo inicial con el estado de la base, el kill switch y el identificador de esta ejecución', async () => {
     const live = openLive(ctx.port);
     const res = await live.ready;
     expect(res.headers['content-type']).toMatch(/text\/event-stream/);
     await waitFor(live, 'hello');
-    expect(live.events[0].data).toMatchObject({ database: { state: 'ok' }, killSwitch: { active: false } });
+    expect(live.events[0].data).toMatchObject({ database: { state: 'ok' }, killSwitch: { active: false }, instanceId: ctx.panel.instanceId });
     live.close();
+    // El mismo identificador que ve la página al cargar (si cambia, el panel se reinició)
+    expect((await ctx.get('/api/meta')).json.panel.instanceId).toBe(ctx.panel.instanceId);
+    expect(ctx.panel.instanceId).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   it('cuando el bot guarda algo → "db"; el kill switch → "killswitch"; una línea de log → "logs"', async () => {

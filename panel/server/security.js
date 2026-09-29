@@ -32,12 +32,11 @@ export const allowedHosts = (port) => [`127.0.0.1:${port}`, `localhost:${port}`]
 export const allowedOrigins = (port) => allowedHosts(port).map((host) => `http://${host}`);
 
 /** Cabeceras de seguridad en TODAS las respuestas. */
-export function securityHeaders({ dev = false } = {}) {
+export function securityHeaders() {
   const csp = [
     "default-src 'self'",
-    // En desarrollo, Vite inyecta estilos y un script de recarga en línea.
-    dev ? "script-src 'self' 'unsafe-inline'" : "script-src 'self'",
-    dev ? "style-src 'self' 'unsafe-inline'" : "style-src 'self'",
+    "script-src 'self'", // ningún script en línea ni de otro sitio
+    "style-src 'self'",
     "img-src 'self' data:",
     "connect-src 'self'",
     "font-src 'self'",
