@@ -1,7 +1,7 @@
 /**
  * Acciones del lanzador: iniciar y detener el bot y el panel, estado, kill
- * switch y reanudar. Cada una verifica antes de actuar y explica en español qué
- * pasó y qué hacer.
+ * switch, reanudar, accesos directos e inicio automático. Cada una verifica
+ * antes de actuar y explica en español qué pasó y qué hacer.
  *
  * Reglas que cumple:
  *   - Nunca modifica el .env ni la configuración: solo los lee.
@@ -11,6 +11,7 @@
  *     se ve en segundo plano), y el inicio automático nunca arranca el bot así.
  *   - Nunca hay dos bots a la vez: además de pm2, mira el heartbeat en la base
  *     (un bot abierto con `npm start` en una terminal).
+ *   - El inicio automático solo se activa o desactiva cuando se pide.
  *
  * Todas las dependencias se inyectan (pm2, consola, reloj, scripts…) para
  * probarlas sin procesos reales.
@@ -22,7 +23,7 @@ import { EXIT_CODES, describeExitCode } from '../../src/lib/exit-codes.js';
 import {
   LauncherError, botLooksAlive, describeSetup, haltedScopes, panelBuildState, probePanel, readBotState, requireBotConfig,
 } from './checks.js';
-import { DEFAULT_ENV_FILE, readEnv } from './env.js';
+import { DEFAULT_ENV_FILE, launcherPaths, readEnv } from './env.js';
 import { ACTIVE_STATUSES, APPS } from './pm2.js';
 
 export const KILL_REASON = 'kill switch desde el acceso directo del escritorio';
@@ -35,11 +36,11 @@ const isActive = (app) => Boolean(app) && ACTIVE_STATUSES.includes(app.status);
 const scopeName = (scope) => `${scope.env}/${scope.mode}`;
 
 /**
- * Últimos mensajes importantes (advertencias y errores) de un log de pm2. Las
- * líneas del bot y del panel son JSON de pino, con la fecha de pm2 adelante.
- * @returns {string[]}
+ * Líneas JSON (pino) del final de un log. Tolera la fecha que pm2 pone adelante
+ * y las líneas que no son JSON. Si el archivo no existe, [].
+ * @returns {object[]}
  */
-export function lastProblems(file, { max = 3, bytes = 64 * 1024 } = {}) {
+function tailEntries(file, bytes = 64 * 1024) {
   let text;
   try {
     const size = fs.statSync(file).size;
@@ -54,18 +55,37 @@ export function lastProblems(file, { max = 3, bytes = 64 * 1024 } = {}) {
   } catch {
     return [];
   }
-  const messages = [];
+  const entries = [];
   for (const line of text.split('\n')) {
     const json = line.indexOf('{');
     if (json === -1) continue;
     try {
-      const entry = JSON.parse(line.slice(json));
-      if (entry.level >= 40 && typeof entry.msg === 'string') messages.push(entry.msg);
+      entries.push(JSON.parse(line.slice(json)));
     } catch {
       // no es una línea de pino
     }
   }
-  return messages.slice(-max);
+  return entries;
+}
+
+/**
+ * Últimos mensajes importantes (advertencias y errores) de un log de pm2.
+ * @returns {string[]}
+ */
+export function lastProblems(file, { max = 3, bytes = 64 * 1024 } = {}) {
+  return tailEntries(file, bytes)
+    .filter((entry) => entry.level >= 40 && typeof entry.msg === 'string')
+    .map((entry) => entry.msg)
+    .slice(-max);
+}
+
+/**
+ * Resultado del último inicio automático, según el log del lanzador.
+ * @returns {{ time: string, panel: string, bot: string } | null}
+ */
+export function lastAutostart(file) {
+  const entry = tailEntries(file).findLast((e) => e.action === 'autostart' && e.panel && e.bot);
+  return entry ? { time: entry.time, panel: entry.panel, bot: entry.bot } : null;
 }
 
 /**
@@ -76,6 +96,8 @@ export function lastProblems(file, { max = 3, bytes = 64 * 1024 } = {}) {
  * @param {(script: string, args?: string[]) => Promise<{ code: number|null }>} deps.runScript
  * @param {() => Promise<void>} deps.buildPanel compila la interfaz (lanza LauncherError si falla)
  * @param {(url: string) => void} deps.openBrowser
+ * @param {ReturnType<import('./shortcuts.js').createShortcuts>} [deps.shortcuts] accesos directos
+ *        (solo Windows; sin él, el estado no muestra el inicio automático)
  */
 export function createLauncher({
   ui,
@@ -84,6 +106,7 @@ export function createLauncher({
   runScript,
   buildPanel,
   openBrowser,
+  shortcuts,
   envFile = DEFAULT_ENV_FILE,
   env = process.env,
   now = Date.now,
@@ -369,6 +392,13 @@ export function createLauncher({
     ui.info(appLine('Panel', panel, isActive(panel) ? ` · http://${PANEL_HOST}:${cfg.port}` : ''));
     ui.info(appLine('Logs', findApp(apps, APPS.logs), ' · rotación cada 5 min'));
 
+    if (shortcuts) {
+      ui.section('Inicio automático (al iniciar sesión en Windows)');
+      ui.info(await shortcuts.autostartEnabled() ? 'Activado.' : 'Desactivado.');
+      const last = lastAutostart(launcherPaths(envInfo().values).launcherLog);
+      if (last) ui.info(`Último: ${dateTime(last.time)} · panel: ${last.panel} · bot: ${last.bot}`);
+    }
+
     ui.section('Configuración (.env)');
     let configOk = true;
     try {
@@ -501,5 +531,81 @@ export function createLauncher({
     return { ok: true };
   }
 
-  return { startBot, stopBot, startPanel, stopPanel, status, kill, resume, cleanupIfIdle };
+  // --- Accesos directos e inicio automático -------------------------------------------
+
+  const requireShortcuts = () => {
+    if (!shortcuts) throw new LauncherError('Los accesos directos y el inicio automático solo existen en Windows.');
+    return shortcuts;
+  };
+
+  async function installShortcuts() {
+    ui.title('Accesos directos');
+    const { dir, files } = await requireShortcuts().installDesktop();
+    ui.ok(`Carpeta "${dir}" con ${files.length} accesos directos:`);
+    for (const file of files) ui.detail(`  ${file.slice(dir.length + 1).replace(/\.lnk$/, '')}`);
+    ui.detail('Si mueves la carpeta del proyecto, vuelve a crearlos con launcher\\windows\\instalar-accesos-directos.bat.');
+    journal.info({ action: 'install-shortcuts', outcome: 'ok', dir }, 'Accesos directos creados');
+    return { ok: true };
+  }
+
+  async function removeShortcuts() {
+    ui.title('Quitar accesos directos');
+    const { dir, files } = await requireShortcuts().removeDesktop();
+    ui.ok(files.length ? `Se quitaron ${files.length} accesos directos de "${dir}".` : 'No había accesos directos que quitar.');
+    journal.info({ action: 'remove-shortcuts', outcome: 'ok', removed: files.length }, 'Accesos directos quitados');
+    return { ok: true };
+  }
+
+  async function autostartOn() {
+    ui.title('Activar el inicio automático');
+    ui.info('Cada vez que inicies sesión en Windows se abrirá una ventana minimizada que:');
+    ui.info('  - inicia el panel (sin abrir el navegador);');
+    ui.info('  - inicia el bot SOLO si DRY_RUN está activado y no hay kill switch ni parada guardada;');
+    ui.info('  - anota el resultado en el log del lanzador ("Estado del bot" lo muestra) y se cierra.');
+    ui.info('Es al iniciar sesión, no al encender el computador antes de entrar.');
+    if (publicConfig().defaultScope.mode !== 'dry-run') {
+      ui.warn('Con tu .env actual (DRY_RUN=false) el bot NO se iniciará solo: solo el panel.');
+    }
+    const { files } = await requireShortcuts().enableAutostart();
+    ui.line();
+    ui.ok(`Inicio automático activado: ${files[0]}`);
+    ui.detail('Para desactivarlo: launcher\\windows\\desactivar-inicio-automatico.bat.');
+    journal.info({ action: 'autostart-on', outcome: 'ok' }, 'Inicio automático activado');
+    return { ok: true };
+  }
+
+  async function autostartOff() {
+    ui.title('Desactivar el inicio automático');
+    const { files } = await requireShortcuts().disableAutostart();
+    ui.ok(files.length ? 'Inicio automático desactivado.' : 'El inicio automático no estaba activado.');
+    ui.detail('Si el bot o el panel están corriendo, siguen corriendo: esto solo cambia lo que pasa al iniciar sesión.');
+    journal.info({ action: 'autostart-off', outcome: 'ok', removed: files.length }, 'Inicio automático desactivado');
+    return { ok: true };
+  }
+
+  /**
+   * Lo que corre al iniciar sesión (sin nadie frente a la pantalla): el panel sin
+   * abrir el navegador y el bot en modo "desatendido" (nunca con DRY_RUN=false).
+   * Un fallo no impide intentar lo otro, y el resultado queda en el log.
+   */
+  async function autostart() {
+    ui.title('Inicio automático');
+    const results = {};
+    for (const [key, run] of [['panel', () => startPanel({ open: false })], ['bot', () => startBot({ unattended: true })]]) {
+      try {
+        await run();
+        results[key] = 'en marcha';
+      } catch (err) {
+        results[key] = `no se inició: ${err.message}`;
+        ui.error(err.message);
+      }
+    }
+    journal.info({ action: 'autostart', ...results }, `Inicio automático: panel ${results.panel}; bot ${results.bot}`);
+    return { ok: true };
+  }
+
+  return {
+    startBot, stopBot, startPanel, stopPanel, status, kill, resume, cleanupIfIdle,
+    installShortcuts, removeShortcuts, autostartOn, autostartOff, autostart,
+  };
 }

@@ -529,6 +529,136 @@ describe('Reanudar bot', () => {
   });
 });
 
+describe('accesos directos', () => {
+  it('crea la carpeta del escritorio y lista los accesos', async () => {
+    ctx = await setupLauncher();
+    expect(await ctx.launcher.installShortcuts()).toEqual({ ok: true });
+    expect(ctx.shortcuts.state.desktop).toBe(true);
+    const text = ctx.ui.text();
+    expect(text).toMatch(/\[ok\] Carpeta "C:\\Users\\prueba\\Desktop\\Binance Spot Bot" con 7 accesos directos:/);
+    for (const name of ['Iniciar bot', 'Detener bot', 'Iniciar panel', 'Detener panel', 'Estado del bot', 'Kill switch', 'Reanudar bot']) {
+      expect(text).toContain(`[detail]   ${name}\n`);
+    }
+    expect(text).toMatch(/Si mueves la carpeta del proyecto, vuelve a crearlos/);
+  });
+
+  it('los quita (o dice que no había)', async () => {
+    ctx = await setupLauncher();
+    await ctx.launcher.removeShortcuts();
+    expect(ctx.ui.text()).toMatch(/No había accesos directos que quitar/);
+    await ctx.launcher.installShortcuts();
+    await ctx.launcher.removeShortcuts();
+    expect(ctx.ui.text()).toMatch(/Se quitaron 7 accesos directos/);
+  });
+
+  it('sin Windows (sin accesos directos) lo explica', async () => {
+    ctx = await setupLauncher({ deps: { shortcuts: undefined } });
+    const err = await rejects(ctx.launcher.installShortcuts());
+    expect(err.message).toBe('Los accesos directos y el inicio automático solo existen en Windows.');
+  });
+});
+
+describe('inicio automático', () => {
+  it('activar: explica qué hará y crea el acceso en la carpeta Inicio', async () => {
+    ctx = await setupLauncher();
+    expect(await ctx.launcher.autostartOn()).toEqual({ ok: true });
+    expect(ctx.shortcuts.state.autostart).toBe(true);
+    const text = ctx.ui.text();
+    expect(text).toMatch(/inicia el panel \(sin abrir el navegador\)/);
+    expect(text).toMatch(/inicia el bot SOLO si DRY_RUN está activado y no hay kill switch ni parada guardada/);
+    expect(text).toMatch(/al iniciar sesión, no al encender el computador/);
+    expect(text).toMatch(/\[ok\] Inicio automático activado: .*Binance Spot Bot \(inicio automático\)\.lnk/);
+    expect(text).toMatch(/desactivar-inicio-automatico\.bat/);
+    expect(text).not.toMatch(/DRY_RUN=false/);
+  });
+
+  it('activar con DRY_RUN=false avisa que el bot no se iniciará solo', async () => {
+    ctx = await setupLauncher({ envLines: ['DRY_RUN=false'] });
+    await ctx.launcher.autostartOn();
+    expect(ctx.ui.text()).toMatch(/\[warn\] Con tu \.env actual \(DRY_RUN=false\) el bot NO se iniciará solo: solo el panel\./);
+  });
+
+  it('desactivar: quita el acceso (o dice que no estaba) y no detiene nada', async () => {
+    ctx = await setupLauncher();
+    ctx.pm2.set('binance-bot', {});
+    await ctx.launcher.autostartOff();
+    expect(ctx.ui.text()).toMatch(/El inicio automático no estaba activado/);
+    await ctx.launcher.autostartOn();
+    await ctx.launcher.autostartOff();
+    expect(ctx.ui.text()).toMatch(/\[ok\] Inicio automático desactivado\./);
+    expect(ctx.pm2.removed()).toEqual([]);
+  });
+
+  describe('al iniciar sesión', () => {
+    const panelResponds = () => ({ probe: async () => (ctx.pm2.apps.has('binance-panel') ? 'ours' : 'free') });
+
+    it('inicia el panel SIN abrir el navegador y el bot; anota el resultado', async () => {
+      ctx = await setupLauncher({ pm2: healthyBot(), deps: panelResponds() });
+      expect(await ctx.launcher.autostart()).toEqual({ ok: true });
+      expect(ctx.pm2.started()).toEqual(['binance-panel', 'binance-logs', 'binance-bot']);
+      expect(ctx.openBrowser).not.toHaveBeenCalled();
+      expect(ctx.journal.lines.at(-1)).toMatchObject({ action: 'autostart', panel: 'en marcha', bot: 'en marcha' });
+    });
+
+    it('con DRY_RUN=false: el panel sí, el bot NUNCA (y no pregunta nada)', async () => {
+      ctx = await setupLauncher({ envLines: ['DRY_RUN=false'], answers: ['OPERAR'], pm2: healthyBot(), deps: panelResponds() });
+      expect(await ctx.launcher.autostart()).toEqual({ ok: true });
+      expect(ctx.pm2.started()).toEqual(['binance-panel', 'binance-logs']);
+      expect(ctx.ui.asked).toEqual([]);
+      expect(ctx.journal.lines.at(-1)).toMatchObject({
+        action: 'autostart', panel: 'en marcha', bot: 'no se inició: DRY_RUN=false: el inicio automático nunca arranca el bot en ese modo.',
+      });
+    });
+
+    it('con el kill switch activo: el bot no se inicia', async () => {
+      ctx = await setupLauncher({ pm2: healthyBot(), deps: panelResponds() });
+      new KillSwitch(ctx.files.killSwitchFile).activate('mantenimiento');
+      await ctx.launcher.autostart();
+      expect(ctx.pm2.started()).toEqual(['binance-panel', 'binance-logs']);
+      expect(ctx.journal.lines.at(-1).bot).toMatch(/^no se inició: El bot está detenido en testnet\/dry-run/);
+    });
+
+    it('si el panel falla, igual intenta el bot (y al revés), sin lanzar errores', async () => {
+      ctx = await setupLauncher({ pm2: healthyBot(), deps: { probe: async () => 'other' } });
+      expect(await ctx.launcher.autostart()).toEqual({ ok: true });
+      expect(ctx.pm2.started()).toEqual(['binance-bot', 'binance-logs']);
+      expect(ctx.journal.lines.at(-1)).toMatchObject({ panel: 'no se inició: El puerto 8799 está ocupado por otro programa.', bot: 'en marcha' });
+      ctx.cleanup();
+      ctx = await setupLauncher({ deps: { probe: async () => 'other' } });
+      ctx.pm2.list = async () => { throw new Error('pm2 no responde'); };
+      expect(await ctx.launcher.autostart()).toEqual({ ok: true });
+      expect(ctx.journal.lines.at(-1)).toMatchObject({ panel: 'no se inició: pm2 no responde', bot: 'no se inició: pm2 no responde' });
+    });
+
+    it('"Estado del bot" muestra si está activado y el último resultado', async () => {
+      ctx = await setupLauncher({ envLines: ['DRY_RUN=false'], deps: { probe: async () => 'other' } });
+      await ctx.launcher.status();
+      expect(ctx.ui.text()).toMatch(/Inicio automático \(al iniciar sesión en Windows\)\]?\n?.*Desactivado\./);
+      expect(ctx.ui.text()).not.toMatch(/Último:/);
+      // Un inicio automático real deja su resultado en el log del lanzador (junto al log del bot).
+      const log = path.join(path.dirname(ctx.files.logFile), 'lanzador.log');
+      fs.mkdirSync(path.dirname(log), { recursive: true });
+      fs.writeFileSync(log, [
+        JSON.stringify({ level: 30, time: '2026-09-30T11:00:00.000Z', action: 'autostart', panel: 'viejo', bot: 'viejo' }),
+        'línea rota',
+        JSON.stringify({ level: 30, time: '2026-09-30T12:00:00.000Z', action: 'autostart', panel: 'en marcha', bot: 'no se inició: DRY_RUN=false: …' }),
+        JSON.stringify({ level: 30, time: '2026-09-30T12:05:00.000Z', action: 'status', outcome: 'ok' }),
+      ].join('\n'));
+      await ctx.launcher.autostartOn();
+      ctx.ui.lines.length = 0;
+      await ctx.launcher.status();
+      expect(ctx.ui.text()).toMatch(/Activado\./);
+      expect(ctx.ui.text()).toMatch(/Último: \d{4}-\d\d-\d\d \d\d:\d\d:\d\d · panel: en marcha · bot: no se inició: DRY_RUN=false: …/);
+    });
+
+    it('sin Windows, el estado no muestra la sección', async () => {
+      ctx = await setupLauncher({ deps: { shortcuts: undefined } });
+      await ctx.launcher.status();
+      expect(ctx.ui.text()).not.toMatch(/Inicio automático/);
+    });
+  });
+});
+
 describe('lastProblems (motivos desde el log de pm2)', () => {
   it('toma advertencias y errores de pino (con la fecha de pm2 adelante) e ignora lo demás', async () => {
     ctx = await setupLauncher();

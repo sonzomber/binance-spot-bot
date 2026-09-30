@@ -51,6 +51,20 @@ poca experiencia en trading: explícale brevemente los conceptos de trading que 
       y exige Host, Origin exacto, Sec-Fetch-Site, JSON, `confirm: true` y el token local.
     - El panel nunca lee ni envía API keys ni secretos, nunca migra la base y nunca
       importa ccxt, ws, el cliente del exchange, la ejecución ni el feed.
+12. **El lanzador (`launcher/`) nunca modifica el `.env` ni la configuración.**
+    - Lee el `.env` en memoria (`dotenv.parse`) y **nunca** lo carga en
+      `process.env`: pm2 guarda ese entorno en su lista de procesos. Solo el
+      proceso del bot carga las keys.
+    - Kill switch y reanudar usan los mismos scripts (`scripts/kill.js`,
+      `scripts/resume.js`), con confirmación escrita: `SI` y `REANUDAR`.
+    - `DRY_RUN=false` exige escribir `OPERAR`. El inicio automático **nunca** arranca
+      el bot con `DRY_RUN=false`.
+    - Nunca dos bots a la vez: revisa pm2 y el heartbeat de `bot_status`.
+    - El lanzador no importa pm2 (AGPL-3.0): lo usa por su línea de comandos.
+13. **Código de salida 3 = detenido a propósito** (`src/lib/exit-codes.js`): kill
+    switch, parada de riesgo, IP bloqueada (418) o arranque rechazado. pm2 no lo
+    reinicia. Una parada deliberada nueva debe salir con 3, nunca con 1: con 1, pm2
+    la reiniciaría en bucle.
 
 ## Forma de trabajo
 
@@ -71,6 +85,16 @@ poca experiencia en trading: explícale brevemente los conceptos de trading que 
   - El `launch.json` va en la carpeta de la sesión (`Desktop\Claude\.claude`), fuera del repo.
   - Revisar consola (violaciones de CSP), tema claro/oscuro, celular (375 px, sin
     desplazamiento horizontal) y estados vacíos.
+- **Probar el lanzador en vivo:**
+  - Con variables del sistema, que ganan sobre el `.env`: `DRY_RUN=true` **siempre**
+    (el `.env` del usuario puede tener `false`), más `DB_PATH`, `LOG_FILE` y
+    `KILL_SWITCH_FILE` temporales y `PANEL_PORT=8798`.
+  - El daemon de pm2 es el real (`~/.pm2`): al terminar, dejar todo detenido y el
+    daemon apagado.
+  - Para abrir el navegador, usar un reemplazo: `main(argv, { deps: { openBrowser } })`.
+  - Las pruebas **nunca** crean accesos directos reales: `shortcuts` siempre
+    simulado, o `paths` a una carpeta temporal.
+  - Con keys reales, escanear `pm2 jlist`, `~/.pm2` y los logs sin imprimirlas.
 - **Las keys reales del `.env` nunca se imprimen**: ni en comandos, ni en salidas, ni
   en logs. Las verificaciones leen el `.env` en memoria (scripts en la carpeta
   temporal) e informan solo sí/no, longitudes o saldos. Nunca pongas una key en la
@@ -88,7 +112,7 @@ poca experiencia en trading: explícale brevemente los conceptos de trading que 
 ```bash
 npm install                  # usa .npmrc (ignore-scripts=true); no requiere compilar nada
 cp .env.example .env         # STRATEGY es obligatoria (el ejemplo trae sma-cross)
-npm test                     # Vitest, 706 pruebas; sin red ni API keys
+npm test                     # Vitest, 857 pruebas; sin red ni API keys
 npm start                    # arranca el bot (dry-run por defecto)
 npm run backtest -- --from 2025-01-01 --to 2025-07-01 [--split 2025-05-01] [--grid '{"fast":[5,9],"slow":[21,30]}']
 npm run kill -- "motivo"     # kill switch: detiene todos los entornos y modos
@@ -99,21 +123,37 @@ npm run reconcile            # diferencias con el exchange (--cancel-unknown, --
 npm run panel                # compila la interfaz y abre el panel en http://127.0.0.1:8787
 npm run panel:dev            # panel + recompilación de la interfaz al guardar
 npm run panel:build          # solo compila la interfaz (panel/web/dist, ignorado por git)
+npm run launcher -- status   # lanzador (pm2): start-bot, stop-bot, start-panel, stop-panel,
+                             #   status, kill, resume, install-shortcuts, remove-shortcuts,
+                             #   autostart-on, autostart-off, autostart; --no-pause no espera
 ```
 
-## Estado (2026-09-29)
+En Windows, los accesos directos (carpeta "Binance Spot Bot" del escritorio) llaman a
+`launcher\windows\lanzador.bat <acción>`. Se crean con
+`launcher\windows\instalar-accesos-directos.bat`.
+
+## Estado (2026-09-30)
 
 **Terminados:**
 - **Módulos 1 a 9:** base y guardia, estrategia, riesgo, almacenamiento, datos,
   ejecución, ciclo del bot, backtest y README.
 - **Panel web, partes 1 a 8:** datos para el panel en el bot, servidor, estructura
   de la interfaz, estado y riesgo, gráfico, órdenes y logs, backtests y documentación.
+- **Lanzador para Windows, partes 1 y 2:**
+  - pm2, la lógica del lanzador y el código de salida 3 en el bot;
+  - los `.bat`, los accesos directos (ya creados en el escritorio del usuario, en la
+    carpeta "Binance Spot Bot"), el inicio automático (**explicado, no activado**:
+    lo decide el usuario) y la documentación.
 
-Hay 706 pruebas pasando. Esquema SQLite en la **v5**.
+Hay 857 pruebas pasando. Esquema SQLite en la **v5**.
 
-**API keys del Spot Testnet:** el usuario ya las puso en su `.env`
-(`BINANCE_ENV=testnet`, `DRY_RUN=true`). Se verificaron el 2026-09-29 con lecturas
-firmadas (cuenta SPOT, saldo del testnet), sin imprimirlas.
+**API keys del Spot Testnet:** el usuario las puso en su `.env` (`BINANCE_ENV=testnet`).
+- Se verificaron el 2026-09-29 con lecturas firmadas (cuenta SPOT, saldo del
+  testnet), sin imprimirlas. En ese momento tenía `DRY_RUN=true`.
+- El 2026-09-29 a las 21:44, **el usuario cambió su `.env` a `DRY_RUN=false`**. No
+  se tocó.
+- Con el lanzador, "Iniciar bot" pide escribir `OPERAR`, y el inicio automático no
+  arranca el bot. Confirmar con el usuario antes de asumir para qué es.
 
 **GitHub:** publicado en <https://github.com/sonzomber/binance-spot-bot> como
 repositorio **privado** (remoto `origin`, rama `main`). Se verificó en el remoto que
@@ -123,7 +163,12 @@ Pendientes:
 - **Decisión del usuario sobre la regla de pérdida diaria:** ver "Decisiones".
 - **Prueba real con órdenes en el testnet:** las keys ya funcionan, pero enviar
   órdenes exige `DRY_RUN=false` y lo decide el usuario. Todo lo de ejecución está
-  probado contra un Binance simulado por HTTP.
+  probado contra un Binance simulado por HTTP. Su `.env` ya tiene `DRY_RUN=false`:
+  ver arriba.
+- **Inicio automático:** explicado y probado en una carpeta temporal. Activarlo lo
+  decide el usuario (`launcher\windows\activar-inicio-automatico.bat`).
+- **GitHub:** los commits del lanzador no se subieron. Hacer push solo si el usuario
+  lo pide, con la verificación de "Forma de trabajo".
 
 ## Arquitectura
 
@@ -141,8 +186,9 @@ Flujo: **datos → (cola del bot) → estrategia → riesgo → ejecución → a
 | `src/app.js` | Arranque en 5 pasos: config y entorno → hora → estado de riesgo → reconciliación → velas históricas. Si uno falla lanza `StartupError` y cierra lo abierto. |
 | `src/bot.js` | Cola secuencial de velas (límites → estrategia → orden → límites), heartbeat, kill switch en caliente y apagado ordenado. Guarda su estado en `bot_status` (arranque, heartbeat, cada vela, apagado); si guardar falla, solo lo advierte. |
 | `src/lifecycle.js` | SIGINT/SIGTERM y errores no controlados → apagado ordenado; segundo Ctrl+C fuerza la salida. |
-| `src/lib/` | `exchange.js` (único lugar que crea el cliente ccxt con keys: guardia + filtro de órdenes + limitador), `logger.js` (con `scope` agrega `"scope":"env/mode"` a cada línea), `backoff.js`, `candles.js`, `ids.js`, `timeframes.js`. |
+| `src/lib/` | `exchange.js` (único lugar que crea el cliente ccxt con keys: guardia + filtro de órdenes + limitador), `logger.js` (con `scope` agrega `"scope":"env/mode"` a cada línea), `exit-codes.js` (0 / 1 / 3 y la lista de rechazos esperados al arrancar), `backoff.js`, `candles.js`, `ids.js`, `timeframes.js`. |
 | `panel/server/` | Servidor del panel (proceso aparte): `index.js` (arranque, 127.0.0.1, token, `instanceId`), `app.js` (`ROUTES`: todo GET + `POST /api/kill-switch`), `security.js` (Host, métodos, Origin, token, CSP), `config.js` (lista blanca sin secretos; valida `PANEL_PORT`), `database.js` (SQLite `readonly` + `query_only`; informa base inexistente o de otra versión), `live.js` (SSE: `data_version`, STOP, log), `log-reader.js` (filtro y redacción), `queries/` (estado, riesgo con el `RiskManager` real, velas con `strategy.evaluate()`, órdenes, backtests con `buyAndHold()`). |
+| `launcher/` | Lanzador con pm2 (por línea de comandos). `cli.js` (verifica Node y `node_modules` antes de cargar nada). `ecosystem.config.cjs` (procesos `binance-bot`, `binance-panel`, `binance-logs`: `stop_exit_codes [0,3]`, espera creciente, `shutdown_with_message`, `merge_logs`). `bot-process.js`/`panel-process.js` (mensaje "shutdown" de pm2 → SIGINT). `log-rotator.js`. `lib/`: `actions.js` (cada acción), `checks.js` (config, interfaz compilada, puerto, estado del bot en solo lectura), `pm2.js` (salida a archivo temporal; corrige "waiting restart"), `env.js`, `console.js`, `rotate.js`, `shortcuts.js` (.lnk con PowerShell), `main.js`. `windows/`: `.bat` en ASCII + CRLF. |
 | `panel/web/` | Interfaz React + Vite, compilada a `dist/` y servida por el servidor del panel. `src/lib/`: lógica pura y probada (formatos, API, textos, vistas de estado/riesgo/gráfico/órdenes/logs/backtests). `src/sections/`: una por sección. `src/components/`: UI, gráficos (lightweight-charts), diálogo y kill switch. `src/hooks/`: SSE (`live.jsx`), `useApi` (datos atados a su URL: nunca se mezclan ámbitos), tema, reloj. |
 
 ## Decisiones tomadas
@@ -260,12 +306,58 @@ Flujo: **datos → (cola del bot) → estrategia → riesgo → ejecución → a
   duplicaría las claves. El navegador filtra las líneas en vivo con la misma regla
   que el servidor; una prueba compara los dos filtros.
 
+**Lanzador (pm2)**
+- **pm2 7.0.4** como dependencia del proyecto, usado por línea de comandos.
+  `overrides` fuerza `js-yaml 4.3.2` en pm2 (`npm audit` en 0).
+- **Reinicio:** espera creciente de 2 s a 15 s (el tope de pm2), `min_uptime` de
+  60 s y `max_restarts` de 10. pm2 cuenta los reinicios seguidos solo en los
+  primeros 10 min desde el inicio. Con código 0 o 3 no reinicia.
+- **Apagado:** `shutdown_with_message`. El mensaje "shutdown" se convierte en
+  `process.emit('SIGINT')`, que es el mismo manejador de Ctrl+C.
+  - `kill_timeout` del bot: 660 s, por encima del vigilante máximo (600 + 30 s).
+  - Si no hay manejador (la rotación), el proceso sale con 0.
+- **Rarezas de pm2 descubiertas en vivo:**
+  - En Windows el daemon hereda las tuberías de quien lo lanza. Por eso la salida
+    de cada comando va a un archivo temporal, se espera `exit` (no `close`) y el
+    daemon se levanta con `pm2 ping` sin stdio.
+  - Con `instances: 1` agrega `-<id>` al nombre de los logs. `merge_logs: true` lo
+    evita.
+  - Con espera creciente, tras un código de `stop_exit_codes` deja el estado en
+    "waiting restart" para siempre. `summarizeApp` lo muestra como "stopped".
+  - Los canales IPC de Windows tienen nombre fijo: `PM2_HOME` no aísla nada, así
+    que se usa `~/.pm2`.
+- **Sin consulta de versión:** `PM2_DISABLE_VERSION_CHECK`. Sin `pm2 save`, sin
+  `pm2 startup` y sin `pm2-logrotate`.
+- **Rotación propia:**
+  - Copiar y vaciar (pino y pm2 escriben en modo "agregar al final"). 10 MB, 5
+    copias (`bot.1.log`…), cada 5 min.
+  - Rota `LOG_FILE`, `lanzador.log`, `logs/pm2/*.log` y `~/.pm2/pm2.log`.
+  - Los logs de pm2 van en `<carpeta de LOG_FILE>/pm2/`, carpeta que se pasa con
+    `BOT_LAUNCHER_LOG_DIR`.
+- **El estado del bot** se lee con `PanelDatabase` + `botStatus()` del panel, en
+  solo lectura. Un arranque cuenta como correcto con `running` y el mismo pid que
+  pm2.
+- **Accesos directos:**
+  - `.lnk` creados con PowerShell `-EncodedCommand` y datos en JSON por una
+    variable de entorno. Las carpetas salen de `GetFolderPath`: el escritorio puede
+    estar en OneDrive.
+  - Íconos de `shell32.dll` e `imageres.dll`. El inicio automático va a la carpeta
+    Inicio, minimizado.
+- **Pausas:** una acción correcta cierra la ventana a los 5 s. Un error o el estado
+  esperan una tecla. `autostart` nunca espera. `process.title` pone el título de la
+  ventana.
+
 ## Convenciones
 
 - **Todo en español:** comentarios, mensajes de log, errores, pruebas y commits.
   JSDoc en las funciones públicas.
 - **Errores de rechazo esperado** (`SafetyError`, `PreflightError`, `StrategyError`,
-  `RiskError`, `ConfigError`) se muestran sin stack trace. Los inesperados, completos.
+  `RiskError`, `ConfigError`, `IpBannedError`; lista en `src/lib/exit-codes.js`) se
+  muestran sin stack trace y, al arrancar, salen con código 3. Los inesperados se
+  muestran completos y salen con 1.
+- **Lanzador:** los textos con acentos los muestra Node. Los `.bat` quedan en ASCII
+  y con CRLF, y usan palabras (OK, AVISO, ERROR) en vez de símbolos que la consola
+  clásica no muestra.
 - **Pruebas de backtest:** con resultados calculados a mano y los cálculos en comentarios.
 - **Interfaz del panel:**
   - La lógica va en `panel/web/src/lib/` como funciones puras con pruebas; los
@@ -277,9 +369,18 @@ Flujo: **datos → (cola del bot) → estrategia → riesgo → ejecución → a
 ## Entorno de desarrollo
 
 - **Sistema:** Windows 11, PowerShell y Git Bash; Node 24 (Volta).
-- **Terminal:** en Git Bash, `node -e` con scripts de varias líneas a veces no
-  ejecuta nada; usa archivos de script. Para editar JSON (p. ej. `package.json`), usa
-  el editor y no `node -e`.
+- **Terminal:**
+  - En Git Bash, `node -e` con scripts de varias líneas a veces no ejecuta nada:
+    usa archivos de script.
+  - Para editar JSON (p. ej. `package.json`), usa el editor y no `node -e`.
+  - Los heredoc de Bash se comen las barras invertidas: los scripts con `\` van
+    escritos con la herramienta de archivos.
+  - `=>{}` dentro de `node -e "…"` terminó creando un archivo llamado `{}`.
+  - Desde Git Bash, `node` crea dos procesos (el intermediario de Volta y el Node
+    real): al cerrarlos por línea de comandos, son dos.
+  - `cmd //c start "título"` desarma las comillas: para abrir ventanas usa
+    PowerShell `Start-Process`.
 - **Señales en Windows:** no se puede enviar SIGINT/SIGTERM "amable" desde otro
   proceso (Node lo convierte en un cierre forzado). El apagado se prueba con pruebas
-  unitarias sobre un `process` simulado y en vivo con `npm run kill`.
+  unitarias sobre un `process` simulado y en vivo con `npm run kill` o con el
+  lanzador ("Detener bot": mensaje de pm2 → SIGINT).

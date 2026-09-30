@@ -101,6 +101,36 @@ export function fakePm2({ now, onStart = {}, onRemove = {} } = {}) {
 }
 
 /**
+ * Accesos directos simulados (NUNCA los reales: crearían archivos en el escritorio).
+ * Guarda qué se pidió y si el inicio automático está activado.
+ */
+export function fakeShortcuts() {
+  const state = { desktop: false, autostart: false, calls: [] };
+  const dir = 'C:\\Users\\prueba\\Desktop\\Binance Spot Bot';
+  const startup = 'C:\\Users\\prueba\\Startup';
+  const desktopFiles = ['Iniciar bot', 'Detener bot', 'Iniciar panel', 'Detener panel', 'Estado del bot', 'Kill switch', 'Reanudar bot']
+    .map((name) => `${dir}\\${name}.lnk`);
+  const autostartFile = `${startup}\\Binance Spot Bot (inicio automático).lnk`;
+  const call = (name, fn) => async () => { state.calls.push(name); return fn(); };
+  return {
+    state,
+    installDesktop: call('installDesktop', () => { state.desktop = true; return { dir, files: desktopFiles }; }),
+    removeDesktop: call('removeDesktop', () => {
+      const files = state.desktop ? desktopFiles : [];
+      state.desktop = false;
+      return { dir, files };
+    }),
+    enableAutostart: call('enableAutostart', () => { state.autostart = true; return { dir: startup, files: [autostartFile] }; }),
+    disableAutostart: call('disableAutostart', () => {
+      const files = state.autostart ? [autostartFile] : [];
+      state.autostart = false;
+      return { dir: startup, files };
+    }),
+    autostartEnabled: async () => state.autostart,
+  };
+}
+
+/**
  * Carpeta temporal con .env, base de datos (escritura, como el bot) y el lanzador.
  * @param {{ envLines?: string[], writeEnv?: boolean, answers?: string[], pm2?: object, deps?: object }} [options]
  */
@@ -135,9 +165,10 @@ export async function setupLauncher({ envLines = [], writeEnv = true, answers = 
   const runScript = vi.fn(async () => ({ code: 0 }));
   const buildPanel = vi.fn(async () => {});
   const openBrowser = vi.fn();
-  const ctx = { tmp, files, writer, ui, pm2, journal, runScript, buildPanel, openBrowser, clock, now };
+  const shortcuts = fakeShortcuts();
+  const ctx = { tmp, files, writer, ui, pm2, journal, runScript, buildPanel, openBrowser, shortcuts, clock, now };
   ctx.launcher = createLauncher({
-    ui, pm2, journal: journal.logger, runScript, buildPanel, openBrowser,
+    ui, pm2, journal: journal.logger, runScript, buildPanel, openBrowser, shortcuts,
     envFile: files.envFile,
     env: {}, // sin variables del sistema: la prueba solo depende del .env temporal
     now,

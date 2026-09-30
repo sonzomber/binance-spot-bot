@@ -4,7 +4,9 @@
  *   node launcher/cli.js <acción> [--no-pause]
  *   npm run launcher -- <acción>
  *
- * Acciones: start-bot, stop-bot, start-panel, stop-panel, status, kill, resume.
+ * Acciones: start-bot, stop-bot, start-panel, stop-panel, status, kill, resume,
+ * install-shortcuts, remove-shortcuts, autostart-on, autostart-off y autostart
+ * (lo que corre al iniciar sesión, si el inicio automático está activado).
  *
  * Antes de cargar cualquier dependencia verifica la versión de Node y que exista
  * node_modules, para explicar qué falta en vez de cerrarse con un error críptico.

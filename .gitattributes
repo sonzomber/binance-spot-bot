@@ -1,2 +1,5 @@
 # Finales de línea LF en el repositorio, sin importar el sistema operativo
 * text=auto eol=lf
+
+# Salvo los .bat: cmd.exe necesita CRLF (con LF puede saltarse líneas o fallar)
+*.bat text eol=crlf

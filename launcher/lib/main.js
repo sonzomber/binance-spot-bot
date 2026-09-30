@@ -1,7 +1,8 @@
 /**
  * Arma el lanzador (pm2, consola, registro, scripts) y ejecuta una acción.
  * Al terminar: si salió bien, la ventana se cierra sola a los 5 s; si falló (o
- * es el estado), espera una tecla para que se pueda leer el mensaje.
+ * es el estado), espera una tecla para que se pueda leer el mensaje. El inicio
+ * automático nunca espera: nadie está mirando (el resultado queda en el log).
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -13,15 +14,22 @@ import { LauncherError, VITE_BIN, WEB_ROOT } from './checks.js';
 import { createConsoleUi } from './console.js';
 import { launcherPaths, readEnv } from './env.js';
 import { Pm2Error, createPm2, runToFile } from './pm2.js';
+import { createShortcuts } from './shortcuts.js';
 
+/** Cada acción y el título de su ventana. */
 export const ACTIONS = Object.freeze({
-  'start-bot': (launcher) => launcher.startBot(),
-  'stop-bot': (launcher) => launcher.stopBot(),
-  'start-panel': (launcher) => launcher.startPanel(),
-  'stop-panel': (launcher) => launcher.stopPanel(),
-  status: (launcher) => launcher.status(),
-  kill: (launcher) => launcher.kill(),
-  resume: (launcher) => launcher.resume(),
+  'start-bot': { title: 'Iniciar bot', run: (launcher) => launcher.startBot() },
+  'stop-bot': { title: 'Detener bot', run: (launcher) => launcher.stopBot() },
+  'start-panel': { title: 'Iniciar panel', run: (launcher) => launcher.startPanel() },
+  'stop-panel': { title: 'Detener panel', run: (launcher) => launcher.stopPanel() },
+  status: { title: 'Estado del bot', run: (launcher) => launcher.status() },
+  kill: { title: 'Kill switch', run: (launcher) => launcher.kill() },
+  resume: { title: 'Reanudar bot', run: (launcher) => launcher.resume() },
+  'install-shortcuts': { title: 'Accesos directos', run: (launcher) => launcher.installShortcuts() },
+  'remove-shortcuts': { title: 'Quitar accesos directos', run: (launcher) => launcher.removeShortcuts() },
+  'autostart-on': { title: 'Activar inicio automático', run: (launcher) => launcher.autostartOn() },
+  'autostart-off': { title: 'Desactivar inicio automático', run: (launcher) => launcher.autostartOff() },
+  autostart: { title: 'Inicio automático', run: (launcher) => launcher.autostart() },
 });
 
 /** Corre un script del proyecto (kill, resume, status) mostrando su salida tal cual. */
@@ -66,9 +74,11 @@ export function openBrowser(url) {
  * @param {{ ui?: ReturnType<typeof createConsoleUi>, deps?: object }} [options] deps: para pruebas
  * @returns {Promise<number>} código de salida
  */
-export async function main(argv, { ui = createConsoleUi(), deps = {} } = {}) {
+export async function main(argv, { ui: givenUi, deps = {} } = {}) {
+  const ui = givenUi ?? createConsoleUi();
   const action = argv.find((arg) => !arg.startsWith('--'));
-  const pause = !argv.includes('--no-pause');
+  // El inicio automático nunca espera una tecla: corre minimizado y sin nadie mirando.
+  const pause = !argv.includes('--no-pause') && action !== 'autostart';
   if (!Object.hasOwn(ACTIONS, action ?? '')) {
     ui.error(`Acción desconocida: ${action ?? '(ninguna)'}.`);
     ui.detail(`Acciones: ${Object.keys(ACTIONS).join(', ')}. Ejemplo: npm run launcher -- status`);
@@ -89,12 +99,14 @@ export async function main(argv, { ui = createConsoleUi(), deps = {} } = {}) {
     runScript,
     buildPanel,
     openBrowser,
+    shortcuts: process.platform === 'win32' ? createShortcuts() : undefined,
     ...deps,
   });
+  if (!givenUi) process.title = `Binance Spot Bot · ${ACTIONS[action].title}`; // título de la ventana
 
   let result;
   try {
-    result = await ACTIONS[action](launcher);
+    result = await ACTIONS[action].run(launcher);
   } catch (err) {
     result = { ok: false };
     ui.line();

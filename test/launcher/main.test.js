@@ -14,16 +14,40 @@ import { SECRET_KEY, SECRET_SECRET, fakeUi, setupLauncher } from './support.js';
 let ctx;
 afterEach(() => ctx?.cleanup());
 
-/** Dependencias de main para la carpeta temporal (nada real: ni pm2, ni scripts, ni navegador). */
+/**
+ * Dependencias de main para la carpeta temporal: nada real (ni pm2, ni scripts, ni
+ * navegador, ni accesos directos en el escritorio).
+ */
 const depsFor = (c, extra = {}) => ({
   envFile: c.files.envFile, env: {}, pm2: c.pm2, journal: c.journal.logger, runScript: c.runScript,
-  buildPanel: c.buildPanel, openBrowser: c.openBrowser, now: c.now, sleep: async (ms) => { c.clock.t += ms; },
+  buildPanel: c.buildPanel, openBrowser: c.openBrowser, shortcuts: c.shortcuts, now: c.now,
+  sleep: async (ms) => { c.clock.t += ms; },
   buildState: () => ({ built: true, outdated: false }), probe: async () => 'free', ...extra,
 });
 
 describe('main', () => {
-  it('las acciones disponibles', () => {
-    expect(Object.keys(ACTIONS)).toEqual(['start-bot', 'stop-bot', 'start-panel', 'stop-panel', 'status', 'kill', 'resume']);
+  it('las acciones disponibles, cada una con el título de su ventana', () => {
+    expect(Object.fromEntries(Object.entries(ACTIONS).map(([name, a]) => [name, a.title]))).toEqual({
+      'start-bot': 'Iniciar bot',
+      'stop-bot': 'Detener bot',
+      'start-panel': 'Iniciar panel',
+      'stop-panel': 'Detener panel',
+      status: 'Estado del bot',
+      kill: 'Kill switch',
+      resume: 'Reanudar bot',
+      'install-shortcuts': 'Accesos directos',
+      'remove-shortcuts': 'Quitar accesos directos',
+      'autostart-on': 'Activar inicio automático',
+      'autostart-off': 'Desactivar inicio automático',
+      autostart: 'Inicio automático',
+    });
+  });
+
+  it('el inicio automático nunca espera una tecla (corre minimizado, sin nadie mirando)', async () => {
+    ctx = await setupLauncher({ writeEnv: false }); // falla todo: igual no espera
+    expect(await main(['autostart'], { ui: ctx.ui, deps: depsFor(ctx) })).toBe(0);
+    expect(ctx.ui.waitKey).not.toHaveBeenCalled();
+    expect(ctx.ui.closeIn).not.toHaveBeenCalled();
   });
 
   it('acción desconocida: lo explica, espera una tecla y sale con 2', async () => {

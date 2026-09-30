@@ -25,6 +25,7 @@ futuro y un panel web de monitoreo de solo lectura.
 - [Gestión de riesgo](#gestión-de-riesgo)
 - [Backtest](#backtest)
 - [Panel de monitoreo](#panel-de-monitoreo)
+- [Lanzador para Windows](#lanzador-para-windows)
 - [Pruebas](#pruebas)
 - [Problemas comunes](#problemas-comunes)
 - [Estructura de carpetas](#estructura-de-carpetas)
@@ -50,6 +51,9 @@ futuro y un panel web de monitoreo de solo lectura.
 - **Panel web** en `http://127.0.0.1:8787`, en un proceso aparte: estado del bot,
   riesgo del día, gráfico con medias y operaciones, órdenes, logs y backtests, en
   tiempo real. Es de solo lectura; su única acción es el kill switch.
+- **Lanzador para Windows**: accesos directos en el escritorio para iniciar y
+  detener el bot y el panel en segundo plano (con pm2), ver el estado, activar el
+  kill switch y reanudar, sin abrir una terminal.
 
 ## Arquitectura
 
@@ -142,6 +146,10 @@ npm test                  # verifica que todo funcione
 npm start                 # arranca en dry-run contra el Spot Testnet
 npm run panel             # (en otra terminal) panel en http://127.0.0.1:8787
 ```
+
+En Windows puedes evitar las terminales: después de `npm install` y de crear el
+`.env`, haz doble clic en `launcher\windows\instalar-accesos-directos.bat` (ver
+[Lanzador para Windows](#lanzador-para-windows)).
 
 No hacen falta herramientas de compilación: `better-sqlite3` trae binarios
 precompilados para Windows, macOS y Linux. El archivo [.npmrc](.npmrc) del proyecto
@@ -304,6 +312,18 @@ promesa rechazada sin manejar):
 **Las posiciones abiertas no se cierran ni se venden**: apagar el bot no toma
 decisiones de trading. Un segundo Ctrl+C fuerza la salida.
 
+**Código de salida.** Le dice al [lanzador](#lanzador-para-windows) (pm2) si debe
+reiniciar el bot solo:
+
+| Código | Cuándo | ¿Se reinicia solo? |
+|---|---|---|
+| `0` | Apagado pedido (Ctrl+C, "Detener bot") | No |
+| `1` | Caída inesperada: un error, la red al arrancar, tres errores seguidos procesando velas | Sí, con espera creciente |
+| `3` | **Detenido a propósito:** kill switch, parada de riesgo, IP bloqueada por Binance (418) o arranque rechazado (config, keys, par, riesgo, reconciliación) | **No**: requiere que lo revises |
+
+Con código 3 el log lo dice claramente, por ejemplo:
+`Detenido a propósito (código 3): kill switch: … No se reinicia solo: revisa el motivo antes de volver a iniciarlo.`
+
 **Otros comandos útiles**
 
 ```bash
@@ -384,11 +404,14 @@ npm run resume              # reanuda (acción manual obligatoria)
 
 - **`npm run kill`** crea el archivo `STOP` y registra la parada en SQLite para
   **todos** los entornos y modos. El botón **Kill switch** del
-  [panel](#panel-de-monitoreo) hace exactamente lo mismo (usa la misma función).
+  [panel](#panel-de-monitoreo) y el acceso directo **Kill switch** del
+  [lanzador](#lanzador-para-windows) hacen exactamente lo mismo.
   - Si el bot está corriendo, lo detecta en ~1 s: cancela las órdenes pendientes y se detiene.
   - Si no está corriendo, no podrá arrancar.
   - Funciona aunque la configuración tenga errores. También sirve crear el archivo a mano.
-- **`npm run resume`** reanuda el entorno y modo configurados en el `.env`.
+- **`npm run resume`** reanuda el entorno y modo configurados en el `.env`. El
+  acceso directo **Reanudar bot** usa el mismo script, después de pedirte escribir
+  `REANUDAR`.
   - El bot **nunca se reanuda solo**, ni al empezar un nuevo día.
   - Si la parada fue por pérdida máxima, se niega a reanudar mientras la pérdida
     realizada de hoy (UTC) siga en el límite, e indica desde cuándo se podrá.
@@ -492,7 +515,8 @@ npm run panel:build    # solo compila la interfaz (panel/web/dist)
 ```
 
 El panel corre en un **proceso separado** del bot: arranca el bot en una terminal
-(`npm start`) y el panel en otra. Si el panel se cierra o falla, el bot no se entera.
+(`npm start`) y el panel en otra, o los dos con el
+[lanzador](#lanzador-para-windows). Si el panel se cierra o falla, el bot no se entera.
 También sirve sin el bot corriendo: muestra lo último que quedó guardado.
 
 ```mermaid
@@ -558,6 +582,83 @@ cambia el kill switch o cuando hay líneas nuevas en el log, el navegador se act
 solo. Si el panel se reinicia con la página abierta, la página lo detecta y pide
 recargar (el token anterior ya no sirve).
 
+## Lanzador para Windows
+
+Accesos directos para usar el bot sin abrir una terminal. El bot y el panel corren
+**en segundo plano** con [pm2](https://pm2.keymetrics.io/) (se instala con el
+proyecto: no hace falta instalarlo aparte), se reinician solos si se caen y sus
+logs rotan.
+
+**Instalación (una vez).** Después de `npm install` y de crear el `.env`, haz doble
+clic en `launcher\windows\instalar-accesos-directos.bat`. Crea en el escritorio la
+carpeta **Binance Spot Bot** con estos accesos:
+
+| Acceso | Qué hace |
+|---|---|
+| **Iniciar bot** | Verifica el `.env`, el kill switch y que no haya otro bot corriendo (tampoco uno abierto con `npm start` en una terminal). Lo inicia y espera a que esté en marcha; si no arranca, muestra el motivo. Con `DRY_RUN=false` te pide escribir `OPERAR`: en segundo plano no se ve la cuenta regresiva de 5 s del bot. |
+| **Detener bot** | Apagado ordenado, **el mismo que Ctrl+C**: termina la operación en curso, cancela las órdenes pendientes y no vende las posiciones. |
+| **Iniciar panel** | Compila la interfaz si falta o cambió, inicia el panel y lo abre en el navegador. Si ya estaba abierto, solo abre el navegador. |
+| **Detener panel** | Detiene el panel. El bot sigue. |
+| **Estado del bot** | Si el bot, el panel y la rotación de logs están corriendo; entorno, `DRY_RUN`, par y estrategia; el último heartbeat; si se detuvo a propósito y por qué; el inicio automático; y la salida de `npm run status` (riesgo, posiciones, órdenes, eventos). Espera una tecla para cerrar. |
+| **Kill switch** | Te pide escribir `SI` y ejecuta lo mismo que `npm run kill`. Después confirma que el bot se detuvo. |
+| **Reanudar bot** | Muestra la parada y qué entorno/modo se reanuda (solo el del `.env`). Te pide escribir `REANUDAR` y ejecuta lo mismo que `npm run resume`. No inicia el bot: eso es "Iniciar bot". |
+
+Si una acción sale bien, la ventana se cierra sola a los 5 segundos. Si algo falla,
+explica qué pasó y qué hacer (falta el `.env`, `.env` con errores, falta
+`npm install`, falta Node.js, el bot ya está corriendo, kill switch activo, puerto
+ocupado, la interfaz no compila…) y espera una tecla.
+
+**Cómo funciona.** Cada acceso ejecuta `launcher\windows\lanzador.bat <acción>`,
+que llama a `node launcher\cli.js`. pm2 corre tres procesos: `binance-bot` (el mismo
+`src/index.js` de `npm start`), `binance-panel` y `binance-logs`.
+
+- **Reinicio automático:** si el bot se cae (código 1), pm2 lo reinicia con espera
+  creciente: 2 s, 3 s, 4,5 s… hasta 15 s. Si se detuvo a propósito (código 3: kill
+  switch, pérdida diaria, IP bloqueada, arranque rechazado), **no** lo reinicia y
+  "Estado del bot" lo muestra. Ver [Código de salida](#correr-el-bot).
+- **Apagado ordenado en Windows:** Windows no permite mandar Ctrl+C a otro proceso
+  (pm2 lo terminaría de golpe). pm2 manda un mensaje y el bot hace su apagado de
+  Ctrl+C.
+- **Logs:** los de pm2 están en `data/logs/pm2/` (`bot.out.log`, `panel.out.log`…).
+  Las acciones del lanzador quedan en `data/logs/lanzador.log`. La rotación revisa
+  cada 5 minutos esos logs y `data/logs/bot.log`. Rota los que pasan de 10 MB
+  (`bot.1.log`, `bot.2.log`…) y conserva 5 copias. Lo escrito en los milisegundos de
+  la rotación puede perderse.
+- **Seguridad:**
+  - El lanzador **nunca modifica** el `.env` ni la configuración: solo los lee.
+  - No carga el `.env` en su entorno. pm2 guarda ese entorno en su lista de
+    procesos, así que las API keys no llegan a pm2: solo las lee el proceso del bot.
+  - Desactiva la consulta diaria de versión de pm2 a sus servidores.
+- Al detener el bot y el panel, se apagan también la rotación y el daemon de pm2.
+- El daemon de pm2 guarda sus archivos en `C:\Users\<tú>\.pm2`.
+- **Si mueves la carpeta del proyecto**, vuelve a ejecutar
+  `instalar-accesos-directos.bat`, porque los accesos guardan la ruta.
+  `quitar-accesos-directos.bat` los quita.
+
+**Inicio automático (opcional, desactivado).**
+- **Activar:** doble clic en `launcher\windows\activar-inicio-automatico.bat`.
+  - Pone un acceso en la carpeta Inicio de Windows (`shell:startup`).
+  - No necesita permisos de administrador ni toca el registro.
+- **Qué hace:**
+  - Corre **al iniciar sesión**, no al encender el PC antes de entrar.
+  - Abre una ventana minimizada que inicia el panel (sin abrir el navegador).
+  - Inicia el bot **solo si `DRY_RUN` está activado** y no hay kill switch ni
+    parada: nunca arranca el bot con `DRY_RUN=false`.
+  - Anota el resultado en el log del lanzador, que "Estado del bot" muestra, y se cierra.
+- **Desactivar:** doble clic en `launcher\windows\desactivar-inicio-automatico.bat`.
+  - También se puede apagar en *Configuración → Aplicaciones → Inicio*.
+  - Desactivarlo no detiene lo que esté corriendo.
+- **Apagar Windows con el bot corriendo** es como un corte: no hay apagado
+  ordenado. Al volver, la reconciliación del arranque resuelve lo pendiente. Para
+  un apagado ordenado, usa antes "Detener bot".
+
+**Desde una terminal** (lo mismo que los accesos directos; probado en Windows):
+
+```bash
+npm run launcher -- status        # también: start-bot, stop-bot, start-panel, stop-panel, kill, resume
+npm run launcher -- status --no-pause
+```
+
 ## Pruebas
 
 ```bash
@@ -566,7 +667,7 @@ npm run test:watch     # modo observación mientras editas
 npx vitest run test/backtest    # solo una carpeta
 ```
 
-Son **706 pruebas en 49 archivos**. No usan la red ni API keys: Binance se simula a
+Son **857 pruebas en 57 archivos**. No usan la red ni API keys: Binance se simula a
 nivel HTTP (a través del cliente ccxt real) y el WebSocket con un socket falso.
 Incluyen:
 - la guardia contra mainnet;
@@ -583,7 +684,16 @@ Incluyen:
   - cada protección del kill switch;
   - que ninguna respuesta contenga las API keys;
   - que no importe nada que pueda conectarse a Binance;
-  - la lógica de la interfaz.
+  - la lógica de la interfaz;
+- el lanzador:
+  - las acciones con pm2 simulado: confirmaciones exactas, rechazos y mensajes;
+  - nunca dos bots, y `DRY_RUN=false` nunca arranca sin confirmación ni en el
+    inicio automático;
+  - que no modifique el `.env` ni cargue las keys en el entorno;
+  - los códigos de salida (0, 1 y 3) y la configuración de pm2;
+  - la rotación de logs con un archivo abierto, como lo tienen pino y pm2;
+  - los `.bat` (ASCII y CRLF) y los accesos directos, creados con el PowerShell
+    real en una carpeta temporal.
 
 ## Problemas comunes
 
@@ -602,9 +712,9 @@ sistema. En Windows: *Configuración → Hora e idioma → Sincronizar ahora*.
 **Límites de peticiones: `429` o `418`**
 - **429:** el bot espera lo que indica `Retry-After` y sigue solo.
 - **418:** Binance **bloqueó tu IP** por seguir pidiendo después de un 429. El bot
-  detiene todas las peticiones y registra hasta cuándo dura el bloqueo. **No lo
-  reinicies en bucle**: cada intento alarga el bloqueo (de 2 minutos hasta 3 días).
-  Espera a la hora indicada.
+  detiene todas las peticiones, registra hasta cuándo dura el bloqueo y sale con
+  código 3 (el lanzador no lo reinicia). **No lo reinicies en bucle**: cada intento
+  alarga el bloqueo (de 2 minutos hasta 3 días). Espera a la hora indicada.
 - Suele pasar al correr varias instancias o scripts pesados a la vez.
 
 **API keys inválidas: `-2008`, `-2014` o `-2015`**
@@ -655,7 +765,28 @@ necesita compilarse, ejecuta `npm rebuild <paquete> --ignore-scripts=false`.
 **Ctrl+C en Windows**
 En la terminal funciona normal: primer Ctrl+C = apagado ordenado, segundo = salida
 forzada. Enviar SIGTERM desde otro proceso no existe en Windows: termina el proceso
-de golpe. Usa Ctrl+C o `npm run kill`.
+de golpe. Usa Ctrl+C, `npm run kill` o, si lo iniciaste con el lanzador, "Detener bot".
+
+**Lanzador: la ventana dice "No se encontro Node.js" o "Faltan las dependencias"**
+Instala Node.js 22.12 o superior, o abre una terminal en la carpeta del proyecto y
+ejecuta `npm install`. Si instalaste Node con la ventana del lanzador abierta,
+ciérrala y vuelve a abrir el acceso.
+
+**Lanzador: "El bot ya está corriendo fuera del lanzador"**
+Hay un bot abierto con `npm start` en una terminal (su heartbeat es reciente). El
+lanzador no inicia otro para no tener dos a la vez. Detén el de la terminal con
+Ctrl+C. Si esa terminal ya no existe, el bot se cerró de golpe: en unos minutos
+figurará "sin responder" y el lanzador podrá iniciarlo.
+
+**Lanzador: el bot se detuvo solo y no vuelve**
+Mira "Estado del bot". Si dice **detenido a propósito (código 3)**, es a propósito:
+kill switch, pérdida diaria, IP bloqueada o arranque rechazado. Resuelve el motivo
+(por ejemplo, "Reanudar bot") y usa "Iniciar bot". Si dice **con errores**, pm2 lo
+reinició 10 veces seguidas sin que durara 1 minuto: revisa `data/logs/pm2/bot.out.log`.
+
+**Lanzador: los accesos directos no hacen nada**
+Probablemente moviste la carpeta del proyecto. Vuelve a ejecutar
+`launcher\windows\instalar-accesos-directos.bat` desde la carpeta nueva.
 
 **Panel: "El puerto 8787 ya está en uso"**
 Otro programa (o un panel que ya abriste) usa ese puerto. Ciérralo o cambia
@@ -741,6 +872,13 @@ binance-spot-bot/
 │   │   └── queries/          estado, riesgo, velas, órdenes, backtests
 │   └── web/                  interfaz (React + Vite), compilada a web/dist (ignorado por git)
 │       └── src/              App, secciones, componentes, hooks y lib (lógica probada)
+├── launcher/                 lanzador (pm2): npm run launcher -- <acción>
+│   ├── cli.js                entrada: verifica Node y dependencias antes de cargar nada
+│   ├── ecosystem.config.cjs  los 3 procesos de pm2 (reinicio, apagado, logs)
+│   ├── bot-process.js, panel-process.js   el bot y el panel bajo pm2 (apagado = Ctrl+C)
+│   ├── log-rotator.js        rotación de logs
+│   ├── lib/                  acciones, verificaciones, pm2, consola, .env, rotación, accesos directos
+│   └── windows/              lanzador.bat y los .bat de instalar accesos e inicio automático
 ├── scripts/                  npm run kill | resume | status | feed | reconcile | backtest | panel
 ├── test/                     pruebas (Vitest), con simuladores de Binance y WebSocket
 ├── data/                     (ignorado por git) bot.db, logs, CSV de backtests y backups/
@@ -774,10 +912,26 @@ binance-spot-bot/
 - **Gráficos con lightweight-charts** de TradingView. Su logo de atribución inserta
   un estilo en línea que la CSP bloquea, así que se desactiva y se muestra un enlace
   propio a TradingView (ver [Créditos](#créditos)).
+- **Lanzador con pm2:**
+  - pm2 se instala con el proyecto y se usa por su línea de comandos, como programa
+    externo (sin importarlo).
+  - **Código de salida 3** para "detenido a propósito": pm2 no distingue una caída
+    de una parada; sin esto, reiniciaría el bot en bucle, incluso con la IP
+    bloqueada.
+  - **Rotación propia** en vez de `pm2-logrotate`: el bot escribe su propio log
+    (`bot.log`), que ese módulo no rota, y además se instalaría fuera del lockfile.
+  - **La salida de pm2 va a un archivo temporal.** En Windows, el daemon de pm2
+    hereda la salida de quien lo lanza y la deja abierta: esperar a que se cierre
+    colgaría el lanzador.
+  - Los `.bat` están en ASCII y con CRLF (`.gitattributes`). Los textos con acentos
+    los muestra Node.
 
 ## Créditos
 
 - **TradingView Lightweight Charts™**. Copyright (с) 2025 TradingView, Inc.
   <https://www.tradingview.com/>. Licencia Apache 2.0. Se usa en los gráficos del panel.
+- **pm2** (<https://pm2.keymetrics.io/>), licencia **AGPL-3.0**. El lanzador lo
+  ejecuta como programa externo por su línea de comandos: no lo importa ni lo
+  modifica, y no se incluye en el repositorio (lo instala npm).
 - **ccxt**, **better-sqlite3**, **Express**, **React**, **Vite**, **pino**, **zod**,
   **ws** y **Vitest**, cada uno con su propia licencia (ver `node_modules/<paquete>/LICENSE`).
