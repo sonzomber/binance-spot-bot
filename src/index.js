@@ -4,10 +4,14 @@
  * Carga la configuración, arranca el bot (secuencia en src/app.js) e instala
  * el manejo de señales: Ctrl+C / SIGTERM y errores inesperados provocan un
  * apagado ordenado (src/bot.js). Un segundo Ctrl+C fuerza la salida.
+ *
+ * Código de salida: 3 si el arranque se rechaza por un motivo esperado (config,
+ * entorno, riesgo…) y 1 si falla por un error inesperado (ver src/lib/exit-codes.js).
  */
 import { startBot } from './app.js';
 import { ConfigError, describeConfig, loadConfig, loadEnvFile } from './config/index.js';
 import { installProcessHandlers } from './lifecycle.js';
+import { EXIT_CODES, isExpectedStartupError, needsAttentionMessage, startupExitCode } from './lib/exit-codes.js';
 import { createLogger } from './lib/logger.js';
 
 async function main() {
@@ -21,10 +25,12 @@ async function main() {
     if (err instanceof ConfigError) {
       const hint = envFileFound ? '' : '\n  (No se encontró .env: copia .env.example como .env y complétalo.)';
       logger.fatal(`El bot no arranca. ${err.message}${hint}`);
+      logger.warn(needsAttentionMessage('configuración inválida en el .env', { startup: true }));
+      process.exitCode = EXIT_CODES.NEEDS_ATTENTION;
     } else {
       logger.fatal({ err }, 'El bot no arranca');
+      process.exitCode = EXIT_CODES.ERROR;
     }
-    process.exitCode = 1;
     return;
   }
 
@@ -47,16 +53,18 @@ async function main() {
   try {
     bot = await startBot({ config, logger });
   } catch (err) {
-    // Rechazos esperados (config, entorno, riesgo…): mensaje claro sin stack trace.
-    // Un error inesperado (un bug) sí se registra completo.
-    const expected = ['SafetyError', 'PreflightError', 'StrategyError', 'RiskError', 'ConfigError', 'IpBannedError'];
+    // Rechazos esperados (config, entorno, riesgo…): mensaje claro sin stack trace y
+    // código 3 (no se reintenta solo). Un error inesperado (un bug, la red) se
+    // registra completo y sale con código 1.
     const cause = err.cause;
+    const expected = isExpectedStartupError(err);
     logger.fatal(
-      { detail: cause?.cause?.message, ...(expected.includes(cause?.name) ? {} : { err: cause ?? err }) },
+      { detail: cause?.cause?.message, ...(expected ? {} : { err: cause ?? err }) },
       `El bot no arranca: ${err.message}`,
     );
+    if (expected) logger.warn(needsAttentionMessage(err.message, { startup: true }));
     handlers.uninstall();
-    process.exitCode = 1;
+    process.exitCode = startupExitCode(err);
     return;
   }
 

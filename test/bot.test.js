@@ -8,6 +8,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TradingBot } from '../src/bot.js';
 import { loadConfig } from '../src/config/index.js';
+import { IpBannedError } from '../src/data/rate-limiter.js';
 import { KillSwitch } from '../src/risk/kill-switch.js';
 import { RiskManager } from '../src/risk/risk-manager.js';
 import { openDatabase } from '../src/storage/db.js';
@@ -196,24 +197,63 @@ describe('apagado ordenado', () => {
     expect(ctx.logs.messages().join()).toMatch(/No se pudieron cancelar las órdenes pendientes/);
   });
 
-  it('el kill switch con el bot corriendo: parada de riesgo y apagado', async () => {
+  it('el kill switch con el bot corriendo: parada de riesgo y apagado con código 3 (no se reinicia solo)', async () => {
     vi.useFakeTimers();
     ctx.bot.start();
     ctx.bot.killSwitch.activate('prueba en caliente');
     await vi.advanceTimersByTimeAsync(1000); // el bot lo revisa cada segundo
     const result = await ctx.bot.stopped;
-    expect(result).toMatchObject({ exitCode: 1, reason: expect.stringMatching(/kill switch: .*prueba en caliente/) });
+    expect(result).toMatchObject({ exitCode: 3, reason: expect.stringMatching(/kill switch: .*prueba en caliente/) });
     expect(ctx.risk.haltState()).toMatchObject({ halted: true, code: 'KILL_SWITCH' });
+    // El log dice claramente que se detuvo a propósito, por qué y que no se reinicia solo.
+    expect(ctx.logs.messages().join('\n')).toMatch(
+      /Bot detenido\. Detenido a propósito \(código 3\): kill switch: .*prueba en caliente\. No se reinicia solo/,
+    );
   });
 
-  it('pérdida diaria alcanzada durante el ciclo: parada y apagado', async () => {
+  it('kill switch con errores al procesarlo: igual se apaga con código 3', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(ctx.risk, 'enforceLimits').mockRejectedValueOnce(new Error('base ocupada'));
+    ctx.bot.start();
+    ctx.bot.killSwitch.activate('prueba');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await ctx.bot.stopped).toMatchObject({ exitCode: 3, reason: 'kill switch (con errores al procesarlo)' });
+  });
+
+  it('pérdida diaria alcanzada antes de operar: parada y apagado con código 3', async () => {
     ctx.risk.recordEntry({ symbol: 'BTC/USDT', qty: 1, price: 100 });
     ctx.risk.recordExit({ symbol: 'BTC/USDT', qty: 1, price: 70 }); // −30 > 20
     ctx.bot.start();
     emit(0);
     const result = await ctx.bot.stopped;
-    expect(result).toMatchObject({ exitCode: 1, reason: expect.stringMatching(/parada de riesgo: pérdida del día/) });
+    expect(result).toMatchObject({ exitCode: 3, reason: expect.stringMatching(/parada de riesgo: pérdida del día/) });
     expect(ctx.executor.submit).not.toHaveBeenCalled();
+  });
+
+  it('pérdida diaria alcanzada por la operación recién hecha: parada y apagado con código 3', async () => {
+    ctx.risk.recordEntry({ symbol: 'BTC/USDT', qty: 1, price: 100 });
+    ctx.strategy.evaluate.mockReturnValue({ action: 'SELL', code: 'TEST', reason: 'prueba' });
+    ctx.executor.submit.mockImplementation(async () => {
+      ctx.risk.recordExit({ symbol: 'BTC/USDT', qty: 1, price: 70 }); // la venta cierra con −30 > 20
+      return { status: 'filled' };
+    });
+    ctx.bot.start();
+    emit(0, 100); // antes de operar no hay pérdida: la posición vale lo que costó
+    const result = await ctx.bot.stopped;
+    expect(ctx.executor.submit).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ exitCode: 3, reason: expect.stringMatching(/parada de riesgo: pérdida del día/) });
+  });
+
+  it('IP bloqueada por Binance (418): se apaga con código 3 para no insistir y alargar el bloqueo', async () => {
+    ctx.bot.start();
+    ctx.feed.emit('fatal', new IpBannedError(Date.now() + 120_000));
+    expect(await ctx.bot.stopped).toMatchObject({ exitCode: 3, reason: expect.stringMatching(/^error irrecuperable en los datos: /) });
+  });
+
+  it('otro error irrecuperable en los datos: se apaga con código 1 (caída; el lanzador lo reinicia)', async () => {
+    ctx.bot.start();
+    ctx.feed.emit('fatal', new Error('WebSocket rechazado'));
+    expect(await ctx.bot.stopped).toMatchObject({ exitCode: 1, reason: 'error irrecuperable en los datos: WebSocket rechazado' });
   });
 });
 
@@ -294,7 +334,7 @@ describe('estado para el panel (bot_status)', () => {
     bot.start();
     emit(0);
     await bot.stopped;
-    expect(status.get()).toMatchObject({ state: 'stopped', exitCode: 1, stopReason: expect.stringMatching(/parada de riesgo: pérdida del día/) });
+    expect(status.get()).toMatchObject({ state: 'stopped', exitCode: 3, stopReason: expect.stringMatching(/parada de riesgo: pérdida del día/) });
   });
 
   it('si guardar el estado falla, el bot sigue IGUAL: procesa, opera y se apaga normalmente', async () => {

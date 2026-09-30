@@ -24,6 +24,7 @@ import { WeightLimiter } from './data/rate-limiter.js';
 import { TimeSync } from './data/time-sync.js';
 import { createExecution } from './execution/index.js';
 import { createTradingExchange } from './lib/exchange.js';
+import { startupExitCode } from './lib/exit-codes.js';
 import { RiskError, createRiskManager } from './risk/risk-manager.js';
 import { BotStatusStore, publicSettings } from './storage/bot-status-store.js';
 import { openDatabase } from './storage/db.js';
@@ -158,8 +159,13 @@ export async function startBot({ config, logger, overrides = {} }) {
     bot.start();
     return bot;
   } catch (err) {
-    // Para el panel: por qué no arrancó (antes de cerrar la base de datos).
-    if (status) saveStatus(logger, 'arranque fallido', () => status.stopped({ time: Date.now(), reason: `no arrancó: ${err.message}`, exitCode: 1 }));
+    // Para el panel: por qué no arrancó (antes de cerrar la base de datos), con el
+    // mismo código de salida que usará el proceso (3 = rechazo esperado, 1 = error).
+    if (status) {
+      saveStatus(logger, 'arranque fallido', () => status.stopped({
+        time: Date.now(), reason: `no arrancó: ${err.message}`, exitCode: startupExitCode(err),
+      }));
+    }
     for (const resource of opened.reverse()) {
       try {
         await resource.close();

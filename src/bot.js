@@ -17,7 +17,13 @@
  * Estado para el panel: si recibe un BotStatusStore, guarda ahí el arranque, cada
  * heartbeat, cada vela procesada y el apagado. Es solo un registro: si guardarlo
  * falla, se advierte en el log y el bot sigue igual (no afecta ninguna decisión).
+ *
+ * Código de salida (src/lib/exit-codes.js): 3 si se detiene a propósito (kill
+ * switch, parada de riesgo, IP bloqueada), para que el lanzador no lo reinicie;
+ * 1 si se cae por un error.
  */
+import { IpBannedError } from './data/rate-limiter.js';
+import { EXIT_CODES, needsAttentionMessage } from './lib/exit-codes.js';
 import { timeframeToMs } from './lib/timeframes.js';
 
 const iso = (ms) => new Date(ms).toISOString();
@@ -68,7 +74,10 @@ export class TradingBot {
       this.lastPrice = price;
       this.lastPriceTime = time;
     });
-    this.#on(this.feed, 'fatal', (err) => this.shutdown(`error irrecuperable en los datos: ${err.message}`, { exitCode: 1 }));
+    this.#on(this.feed, 'fatal', (err) => this.shutdown(`error irrecuperable en los datos: ${err.message}`, {
+      // Con la IP bloqueada, reiniciar solo volvería a llamar a Binance y alargaría el bloqueo.
+      exitCode: err instanceof IpBannedError ? EXIT_CODES.NEEDS_ATTENTION : EXIT_CODES.ERROR,
+    }));
     this.stopKillSwitchWatch = this.killSwitch?.watch(() => this.#onKillSwitch());
     this.timers.heartbeat = setInterval(() => this.heartbeat(), this.heartbeatMs);
     this.timers.heartbeat.unref?.();
@@ -120,7 +129,7 @@ export class TradingBot {
       this.consecutiveErrors++;
       this.logger.error({ err, candle: iso(event.candle.time) }, 'Error procesando la vela');
       if (this.consecutiveErrors >= 3) {
-        void this.shutdown(`${this.consecutiveErrors} errores seguidos procesando velas`, { exitCode: 1 });
+        void this.shutdown(`${this.consecutiveErrors} errores seguidos procesando velas`, { exitCode: EXIT_CODES.ERROR });
       }
     }
   }
@@ -137,7 +146,7 @@ export class TradingBot {
     // 1. Límites (kill switch, pérdida diaria, parada guardada)
     const before = await this.risk.enforceLimits({ markPrices: markPrices(), cancelOpenOrders });
     if (before.halted) {
-      void this.shutdown(`parada de riesgo: ${before.reason}`, { exitCode: 1 });
+      void this.shutdown(`parada de riesgo: ${before.reason}`, { exitCode: EXIT_CODES.NEEDS_ATTENTION });
       return;
     }
 
@@ -170,7 +179,7 @@ export class TradingBot {
 
     // 4. Límites otra vez: una operación cerrada con pérdida puede alcanzar el máximo diario
     const after = await this.risk.enforceLimits({ markPrices: markPrices(), cancelOpenOrders });
-    if (after.halted) void this.shutdown(`parada de riesgo: ${after.reason}`, { exitCode: 1 });
+    if (after.halted) void this.shutdown(`parada de riesgo: ${after.reason}`, { exitCode: EXIT_CODES.NEEDS_ATTENTION });
   }
 
   async #onKillSwitch() {
@@ -179,10 +188,10 @@ export class TradingBot {
         markPrices: { [this.symbol]: this.getPrice() },
         cancelOpenOrders: () => this.executor.cancelAll(),
       });
-      await this.shutdown(result.reason ?? 'kill switch activado', { exitCode: 1 });
+      await this.shutdown(result.reason ?? 'kill switch activado', { exitCode: EXIT_CODES.NEEDS_ATTENTION });
     } catch (err) {
       this.logger.error({ err }, 'Error al procesar el kill switch');
-      await this.shutdown('kill switch (con errores al procesarlo)', { exitCode: 1 });
+      await this.shutdown('kill switch (con errores al procesarlo)', { exitCode: EXIT_CODES.NEEDS_ATTENTION });
     }
   }
 
@@ -312,7 +321,10 @@ export class TradingBot {
         this.logger.warn({ err: err.message, resource: resource.name }, `Error al cerrar ${resource.name}`);
       }
     }
-    this.logger[level]({ reason, exitCode }, `Bot detenido: ${reason}`);
+    this.logger[level](
+      { reason, exitCode },
+      exitCode === EXIT_CODES.NEEDS_ATTENTION ? `Bot detenido. ${needsAttentionMessage(reason)}` : `Bot detenido: ${reason}`,
+    );
     const result = { reason, exitCode, timedOut };
     this.resolveStopped(result);
     return result;

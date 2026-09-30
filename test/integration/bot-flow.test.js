@@ -215,11 +215,19 @@ describe('estado del bot para el panel (bot_status)', () => {
     expect(readStatus()).toMatchObject({ state: 'stopped', stopReason: 'prueba del panel', exitCode: 0 });
   });
 
-  it('si el arranque falla, queda registrado por qué (sin dejar la base bloqueada)', async () => {
+  it('si el arranque se rechaza, queda registrado por qué y con código 3 (sin dejar la base bloqueada)', async () => {
     new KillSwitch(config.risk.killSwitchFile).activate('mantenimiento');
     await start().catch(() => {});
     expect(readStatus()).toMatchObject({
-      state: 'stopped', exitCode: 1, stopReason: expect.stringMatching(/^no arrancó: paso 3\/5 .*kill switch activo/),
+      state: 'stopped', exitCode: 3, stopReason: expect.stringMatching(/^no arrancó: paso 3\/5 .*kill switch activo/),
+    });
+  });
+
+  it('si el arranque falla por un error inesperado, queda registrado con código 1 (se puede reintentar)', async () => {
+    fake.historyStart = Math.floor(Date.now() / MIN) * MIN - 3 * MIN; // paso 5: faltan velas (Error genérico)
+    await start().catch(() => {});
+    expect(readStatus()).toMatchObject({
+      state: 'stopped', exitCode: 1, stopReason: expect.stringMatching(/^no arrancó: paso 5\/5 /),
     });
   });
 });
