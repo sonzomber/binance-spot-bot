@@ -71,6 +71,16 @@ poca experiencia en trading: explícale brevemente los conceptos de trading que 
   - El `launch.json` va en la carpeta de la sesión (`Desktop\Claude\.claude`), fuera del repo.
   - Revisar consola (violaciones de CSP), tema claro/oscuro, celular (375 px, sin
     desplazamiento horizontal) y estados vacíos.
+- **Las keys reales del `.env` nunca se imprimen**: ni en comandos, ni en salidas, ni
+  en logs. Las verificaciones leen el `.env` en memoria (scripts en la carpeta
+  temporal) e informan solo sí/no, longitudes o saldos. Nunca pongas una key en la
+  línea de comandos.
+- **Antes de publicar o hacer push:**
+  - `git check-ignore -v .env data/`;
+  - `git ls-files` sin `.env`, bases de datos ni logs;
+  - escaneo de TODO el historial (todas las versiones y los mensajes) buscando las
+    keys del `.env` y cadenas con forma de key, sin imprimirlas;
+  - después del push, confirmar en el remoto que `.env` y `data/` no están.
 - Ser transparente con errores propios, límites y decisiones pendientes.
 
 ## Comandos
@@ -101,11 +111,17 @@ npm run panel:build          # solo compila la interfaz (panel/web/dist, ignorad
 
 Hay 706 pruebas pasando. Esquema SQLite en la **v5**.
 
+**API keys del Spot Testnet:** el usuario ya las puso en su `.env`
+(`BINANCE_ENV=testnet`, `DRY_RUN=true`). Se verificaron el 2026-09-29 con lecturas
+firmadas (cuenta SPOT, saldo del testnet), sin imprimirlas.
+
 Pendientes:
 - **Decisión del usuario sobre la regla de pérdida diaria:** ver "Decisiones".
-- **Prueba real con órdenes en el testnet:** requiere las API keys del usuario. Todo
-  lo de ejecución está probado contra un Binance simulado por HTTP.
-- El repositorio no tiene remoto (no está publicado en GitHub).
+- **Prueba real con órdenes en el testnet:** las keys ya funcionan, pero enviar
+  órdenes exige `DRY_RUN=false` y lo decide el usuario. Todo lo de ejecución está
+  probado contra un Binance simulado por HTTP.
+- **GitHub:** el proyecto se publica como repositorio **privado**. Antes de cada
+  push, hacer la verificación de "Forma de trabajo".
 
 ## Arquitectura
 

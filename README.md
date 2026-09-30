@@ -166,6 +166,10 @@ No requiere cuenta de Binance.
 3. Copia la **API key** y el **secret** a tu `.env`. Guarda el secret en ese momento:
    después no se vuelve a mostrar.
 
+El testnet no tiene retiros ni billetera (sus endpoints `/sapi` no existen), y sus
+keys no tienen opciones de permisos. Si consultas la cuenta verás
+`canWithdraw: true`: es un indicador de la cuenta, no un permiso de la key.
+
 El testnet regala saldos de varias monedas y **se reinicia aproximadamente una vez
 al mes**: se borran los saldos y las órdenes. Después de un reinicio, la
 reconciliación del bot detectará la diferencia (ver [Problemas comunes](#problemas-comunes)).
@@ -194,6 +198,16 @@ virtuales se reinician a mano desde la interfaz.
 - **Una key por uso** (bot, pruebas manuales…). Si se filtra, revócala y crea otra.
 - El bot **nunca muestra los secretos** en los logs: aparecen como `[REDACTED]`, y al
   arrancar solo informa si hay credenciales configuradas.
+- **Antes de subir el repositorio** (aunque sea privado), confirma que `.env` y
+  `data/` están ignorados y que ningún commit los incluye:
+
+  ```bash
+  git check-ignore -v .env data/          # debe mostrar la regla de .gitignore de cada uno
+  git log --all --name-only --pretty=format: | sort -u | grep -E "^\.env$|^data/|\.db$"   # debe salir vacío
+  ```
+
+  Si alguna vez subiste una key por error, **revócala** en el exchange y crea otra:
+  borrarla del repositorio no la vuelve secreta otra vez.
 
 ## Configuración
 
