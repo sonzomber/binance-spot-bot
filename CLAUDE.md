@@ -115,13 +115,15 @@ Hay 706 pruebas pasando. Esquema SQLite en la **v5**.
 (`BINANCE_ENV=testnet`, `DRY_RUN=true`). Se verificaron el 2026-09-29 con lecturas
 firmadas (cuenta SPOT, saldo del testnet), sin imprimirlas.
 
+**GitHub:** publicado en <https://github.com/sonzomber/binance-spot-bot> como
+repositorio **privado** (remoto `origin`, rama `main`). Se verificó en el remoto que
+`.env` y `data/` no están. Antes de cada push, hacer la verificación de "Forma de trabajo".
+
 Pendientes:
 - **Decisión del usuario sobre la regla de pérdida diaria:** ver "Decisiones".
 - **Prueba real con órdenes en el testnet:** las keys ya funcionan, pero enviar
   órdenes exige `DRY_RUN=false` y lo decide el usuario. Todo lo de ejecución está
   probado contra un Binance simulado por HTTP.
-- **GitHub:** el proyecto se publica como repositorio **privado**. Antes de cada
-  push, hacer la verificación de "Forma de trabajo".
 
 ## Arquitectura
 
